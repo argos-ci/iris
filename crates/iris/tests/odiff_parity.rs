@@ -13,7 +13,7 @@ mod support;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use adiff::{compare, Antialiasing, Image, Mask, Options, Tier};
+use iris::{compare, Antialiasing, Image, Mask, Options, Tier};
 use support::{encode_rgba, fixtures, image_from_fn, Random};
 
 fn odiff_binary() -> Option<PathBuf> {
@@ -33,7 +33,7 @@ struct Scratch(PathBuf);
 
 impl Scratch {
   fn new(name: &str) -> Self {
-    let path = std::env::temp_dir().join(format!("adiff-{name}-{}", std::process::id()));
+    let path = std::env::temp_dir().join(format!("iris-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&path).unwrap();
     Self(path)
   }

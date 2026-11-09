@@ -5,7 +5,7 @@
 
 mod support;
 
-use adiff::{fingerprint_png, Mask};
+use iris::{fingerprint_png, Mask};
 use support::reference_fingerprint::fingerprint as reference;
 use support::{fixtures, Random};
 

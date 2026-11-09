@@ -1,4 +1,4 @@
-# @argos-ci/adiff
+# @argos-ci/iris
 
 Screenshot comparison in a single pass, written in Rust, for Node.js.
 
@@ -14,7 +14,7 @@ threshold is evaluated in the same scan; anti-aliasing is decided once per
 pixel; and the fingerprint is computed from the mask in memory.
 
 ```ts
-import { diff } from "@argos-ci/adiff";
+import { diff } from "@argos-ci/iris";
 
 const result = await diff("base.png", "head.png", { output: "mask.png" });
 
@@ -58,7 +58,7 @@ Two detectors, chosen with `antialiasing`:
   thin stroke that kept its ink and its centre.
 
 What that changes, each line being a test in
-[`tests/antialiasing.rs`](crates/adiff/tests/antialiasing.rs):
+[`tests/antialiasing.rs`](crates/iris/tests/antialiasing.rs):
 
 |                                                    | classic      | subpixel |
 | -------------------------------------------------- | ------------ | -------- |
@@ -73,7 +73,7 @@ What that changes, each line being a test in
 | a new hairline, a bolder stroke                    | reported     | reported |
 
 On the screenshot fixtures, differing pixels left at the sensitive tier
-(`cargo run --release -p adiff --example antialiasing`):
+(`cargo run --release -p iris --example antialiasing`):
 
 | nothing changed but the rendering | none   | classic | subpixel |
 | --------------------------------- | ------ | ------- | -------- |
@@ -98,7 +98,7 @@ square, reduced to a 16×16 grid of fill levels, and hashed. Position and scale
 drop out. The format is `v1` of `@argos-ci/mask-fingerprint` and the values
 are identical bit for bit — including the three places where the original,
 which streams a PNG row by row, departs from a textbook dilation. They are
-written down in [`fingerprint.rs`](crates/adiff/src/fingerprint.rs) and
+written down in [`fingerprint.rs`](crates/iris/src/fingerprint.rs) and
 checked against a copy of the original on every mask up to 4×4 and thousands
 of random ones.
 
@@ -203,12 +203,12 @@ take 16 ms each to inflate.
 
 ## Rust
 
-The comparison is the `adiff` crate, in
-[`crates/adiff`](crates/adiff); the Node.js package is a thin N-API
+The comparison is the `iris` crate, in
+[`crates/iris`](crates/iris); the Node.js package is a thin N-API
 binding over it.
 
 ```rust
-use adiff::{compare_files, Antialiasing, Options};
+use iris::{compare_files, Antialiasing, Options};
 
 let options = Options {
   antialiasing: Antialiasing::Subpixel,

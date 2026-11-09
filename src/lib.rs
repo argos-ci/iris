@@ -2,7 +2,7 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use adiff::{
+use iris::{
   compare_buffers, compare_files, fingerprint_png, Antialiasing, Comparison, Mask, Options, Rect,
   Tier,
 };
@@ -280,7 +280,7 @@ fn into_js(outcome: Outcome) -> JsDiffResult {
 
 /* ----------------------------------- tasks ---------------------------------- */
 
-fn to_napi(error: adiff::Error) -> napi::Error {
+fn to_napi(error: iris::Error) -> napi::Error {
   napi::Error::from_reason(error.to_string())
 }
 
@@ -294,7 +294,7 @@ fn guarded<T>(work: impl FnOnce() -> napi::Result<T>) -> napi::Result<T> {
       .or_else(|| panic.downcast_ref::<String>().cloned())
       .unwrap_or_else(|| "unknown error".to_string());
     Err(napi::Error::from_reason(format!(
-      "adiff panicked: {message}"
+      "iris panicked: {message}"
     )))
   })
 }

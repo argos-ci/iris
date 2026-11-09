@@ -3,26 +3,6 @@
 version = 4
 
 [[package]]
-name = "adiff"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "png",
- "zune-jpeg",
-]
-
-[[package]]
-name = "adiff-node"
-version = "0.1.0"
-dependencies = [
- "adiff",
- "napi",
- "napi-build",
- "napi-derive",
- "sha2",
-]
-
-[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -224,6 +204,26 @@ checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 dependencies = [
  "typenum",
  "version_check",
+]
+
+[[package]]
+name = "iris"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "png",
+ "zune-jpeg",
+]
+
+[[package]]
+name = "iris-node"
+version = "0.1.0"
+dependencies = [
+ "iris",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "sha2",
 ]
 
 [[package]]

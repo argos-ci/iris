@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use adiff::Image;
+use iris::Image;
 
 pub mod reference_fingerprint;
 

@@ -3,7 +3,7 @@
 
 mod support;
 
-use adiff::{compare, Comparison, Image, Options, Rect, ShiftSegment};
+use iris::{compare, Comparison, Image, Options, Rect, ShiftSegment};
 
 const WHITE: [u8; 4] = [255, 255, 255, 255];
 const INK: [u8; 4] = [20, 24, 40, 255];

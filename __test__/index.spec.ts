@@ -17,7 +17,7 @@ const pair = (name: string) => ({
 
 let scratch: string;
 beforeAll(async () => {
-  scratch = await mkdtemp(join(tmpdir(), "adiff-"));
+  scratch = await mkdtemp(join(tmpdir(), "iris-"));
 });
 afterAll(async () => {
   await rm(scratch, { recursive: true, force: true });

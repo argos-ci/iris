@@ -87,13 +87,13 @@ function requireNative() {
   } else if (process.platform === 'android') {
     if (process.arch === 'arm64') {
       try {
-        return require('./adiff.android-arm64.node')
+        return require('./iris.android-arm64.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@argos-ci/adiff-android-arm64')
-        const bindingPackageVersion = require('@argos-ci/adiff-android-arm64/package.json').version
+        const binding = require('@argos-ci/iris-android-arm64')
+        const bindingPackageVersion = require('@argos-ci/iris-android-arm64/package.json').version
         if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -103,13 +103,13 @@ function requireNative() {
       }
     } else if (process.arch === 'arm') {
       try {
-        return require('./adiff.android-arm-eabi.node')
+        return require('./iris.android-arm-eabi.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@argos-ci/adiff-android-arm-eabi')
-        const bindingPackageVersion = require('@argos-ci/adiff-android-arm-eabi/package.json').version
+        const binding = require('@argos-ci/iris-android-arm-eabi')
+        const bindingPackageVersion = require('@argos-ci/iris-android-arm-eabi/package.json').version
         if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -124,13 +124,13 @@ function requireNative() {
     if (process.arch === 'x64') {
       if ((process.config && process.config.variables && process.config.variables.shlib_suffix === 'dll.a') || (process.config && process.config.variables && process.config.variables.node_target_type === 'shared_library')) {
         try {
-          return require('./adiff.win32-x64-gnu.node')
+          return require('./iris.win32-x64-gnu.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@argos-ci/adiff-win32-x64-gnu')
-          const bindingPackageVersion = require('@argos-ci/adiff-win32-x64-gnu/package.json').version
+          const binding = require('@argos-ci/iris-win32-x64-gnu')
+          const bindingPackageVersion = require('@argos-ci/iris-win32-x64-gnu/package.json').version
           if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -140,13 +140,13 @@ function requireNative() {
         }
       } else {
         try {
-          return require('./adiff.win32-x64-msvc.node')
+          return require('./iris.win32-x64-msvc.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@argos-ci/adiff-win32-x64-msvc')
-          const bindingPackageVersion = require('@argos-ci/adiff-win32-x64-msvc/package.json').version
+          const binding = require('@argos-ci/iris-win32-x64-msvc')
+          const bindingPackageVersion = require('@argos-ci/iris-win32-x64-msvc/package.json').version
           if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -157,13 +157,13 @@ function requireNative() {
       }
     } else if (process.arch === 'ia32') {
       try {
-        return require('./adiff.win32-ia32-msvc.node')
+        return require('./iris.win32-ia32-msvc.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@argos-ci/adiff-win32-ia32-msvc')
-        const bindingPackageVersion = require('@argos-ci/adiff-win32-ia32-msvc/package.json').version
+        const binding = require('@argos-ci/iris-win32-ia32-msvc')
+        const bindingPackageVersion = require('@argos-ci/iris-win32-ia32-msvc/package.json').version
         if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -173,13 +173,13 @@ function requireNative() {
       }
     } else if (process.arch === 'arm64') {
       try {
-        return require('./adiff.win32-arm64-msvc.node')
+        return require('./iris.win32-arm64-msvc.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@argos-ci/adiff-win32-arm64-msvc')
-        const bindingPackageVersion = require('@argos-ci/adiff-win32-arm64-msvc/package.json').version
+        const binding = require('@argos-ci/iris-win32-arm64-msvc')
+        const bindingPackageVersion = require('@argos-ci/iris-win32-arm64-msvc/package.json').version
         if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -192,13 +192,13 @@ function requireNative() {
     }
   } else if (process.platform === 'darwin') {
     try {
-      return require('./adiff.darwin-universal.node')
+      return require('./iris.darwin-universal.node')
     } catch (e) {
       loadErrors.push(e)
     }
     try {
-      const binding = require('@argos-ci/adiff-darwin-universal')
-      const bindingPackageVersion = require('@argos-ci/adiff-darwin-universal/package.json').version
+      const binding = require('@argos-ci/iris-darwin-universal')
+      const bindingPackageVersion = require('@argos-ci/iris-darwin-universal/package.json').version
       if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
         throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
       }
@@ -208,13 +208,13 @@ function requireNative() {
     }
     if (process.arch === 'x64') {
       try {
-        return require('./adiff.darwin-x64.node')
+        return require('./iris.darwin-x64.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@argos-ci/adiff-darwin-x64')
-        const bindingPackageVersion = require('@argos-ci/adiff-darwin-x64/package.json').version
+        const binding = require('@argos-ci/iris-darwin-x64')
+        const bindingPackageVersion = require('@argos-ci/iris-darwin-x64/package.json').version
         if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -224,13 +224,13 @@ function requireNative() {
       }
     } else if (process.arch === 'arm64') {
       try {
-        return require('./adiff.darwin-arm64.node')
+        return require('./iris.darwin-arm64.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@argos-ci/adiff-darwin-arm64')
-        const bindingPackageVersion = require('@argos-ci/adiff-darwin-arm64/package.json').version
+        const binding = require('@argos-ci/iris-darwin-arm64')
+        const bindingPackageVersion = require('@argos-ci/iris-darwin-arm64/package.json').version
         if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -244,13 +244,13 @@ function requireNative() {
   } else if (process.platform === 'freebsd') {
     if (process.arch === 'x64') {
       try {
-        return require('./adiff.freebsd-x64.node')
+        return require('./iris.freebsd-x64.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@argos-ci/adiff-freebsd-x64')
-        const bindingPackageVersion = require('@argos-ci/adiff-freebsd-x64/package.json').version
+        const binding = require('@argos-ci/iris-freebsd-x64')
+        const bindingPackageVersion = require('@argos-ci/iris-freebsd-x64/package.json').version
         if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -260,13 +260,13 @@ function requireNative() {
       }
     } else if (process.arch === 'arm64') {
       try {
-        return require('./adiff.freebsd-arm64.node')
+        return require('./iris.freebsd-arm64.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@argos-ci/adiff-freebsd-arm64')
-        const bindingPackageVersion = require('@argos-ci/adiff-freebsd-arm64/package.json').version
+        const binding = require('@argos-ci/iris-freebsd-arm64')
+        const bindingPackageVersion = require('@argos-ci/iris-freebsd-arm64/package.json').version
         if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -276,13 +276,13 @@ function requireNative() {
       }
     } else if (process.arch === 'ppc64') {
       try {
-        return require('./adiff.freebsd-ppc64.node')
+        return require('./iris.freebsd-ppc64.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@argos-ci/adiff-freebsd-ppc64')
-        const bindingPackageVersion = require('@argos-ci/adiff-freebsd-ppc64/package.json').version
+        const binding = require('@argos-ci/iris-freebsd-ppc64')
+        const bindingPackageVersion = require('@argos-ci/iris-freebsd-ppc64/package.json').version
         if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -297,13 +297,13 @@ function requireNative() {
     if (process.arch === 'x64') {
       if (isMusl()) {
         try {
-          return require('./adiff.linux-x64-musl.node')
+          return require('./iris.linux-x64-musl.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@argos-ci/adiff-linux-x64-musl')
-          const bindingPackageVersion = require('@argos-ci/adiff-linux-x64-musl/package.json').version
+          const binding = require('@argos-ci/iris-linux-x64-musl')
+          const bindingPackageVersion = require('@argos-ci/iris-linux-x64-musl/package.json').version
           if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -313,13 +313,13 @@ function requireNative() {
         }
       } else {
         try {
-          return require('./adiff.linux-x64-gnu.node')
+          return require('./iris.linux-x64-gnu.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@argos-ci/adiff-linux-x64-gnu')
-          const bindingPackageVersion = require('@argos-ci/adiff-linux-x64-gnu/package.json').version
+          const binding = require('@argos-ci/iris-linux-x64-gnu')
+          const bindingPackageVersion = require('@argos-ci/iris-linux-x64-gnu/package.json').version
           if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -331,13 +331,13 @@ function requireNative() {
     } else if (process.arch === 'arm64') {
       if (isMusl()) {
         try {
-          return require('./adiff.linux-arm64-musl.node')
+          return require('./iris.linux-arm64-musl.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@argos-ci/adiff-linux-arm64-musl')
-          const bindingPackageVersion = require('@argos-ci/adiff-linux-arm64-musl/package.json').version
+          const binding = require('@argos-ci/iris-linux-arm64-musl')
+          const bindingPackageVersion = require('@argos-ci/iris-linux-arm64-musl/package.json').version
           if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -347,13 +347,13 @@ function requireNative() {
         }
       } else {
         try {
-          return require('./adiff.linux-arm64-gnu.node')
+          return require('./iris.linux-arm64-gnu.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@argos-ci/adiff-linux-arm64-gnu')
-          const bindingPackageVersion = require('@argos-ci/adiff-linux-arm64-gnu/package.json').version
+          const binding = require('@argos-ci/iris-linux-arm64-gnu')
+          const bindingPackageVersion = require('@argos-ci/iris-linux-arm64-gnu/package.json').version
           if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -365,13 +365,13 @@ function requireNative() {
     } else if (process.arch === 'arm') {
       if (isMusl()) {
         try {
-          return require('./adiff.linux-arm-musleabihf.node')
+          return require('./iris.linux-arm-musleabihf.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@argos-ci/adiff-linux-arm-musleabihf')
-          const bindingPackageVersion = require('@argos-ci/adiff-linux-arm-musleabihf/package.json').version
+          const binding = require('@argos-ci/iris-linux-arm-musleabihf')
+          const bindingPackageVersion = require('@argos-ci/iris-linux-arm-musleabihf/package.json').version
           if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -381,13 +381,13 @@ function requireNative() {
         }
       } else {
         try {
-          return require('./adiff.linux-arm-gnueabihf.node')
+          return require('./iris.linux-arm-gnueabihf.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@argos-ci/adiff-linux-arm-gnueabihf')
-          const bindingPackageVersion = require('@argos-ci/adiff-linux-arm-gnueabihf/package.json').version
+          const binding = require('@argos-ci/iris-linux-arm-gnueabihf')
+          const bindingPackageVersion = require('@argos-ci/iris-linux-arm-gnueabihf/package.json').version
           if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -399,13 +399,13 @@ function requireNative() {
     } else if (process.arch === 'loong64') {
       if (isMusl()) {
         try {
-          return require('./adiff.linux-loong64-musl.node')
+          return require('./iris.linux-loong64-musl.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@argos-ci/adiff-linux-loong64-musl')
-          const bindingPackageVersion = require('@argos-ci/adiff-linux-loong64-musl/package.json').version
+          const binding = require('@argos-ci/iris-linux-loong64-musl')
+          const bindingPackageVersion = require('@argos-ci/iris-linux-loong64-musl/package.json').version
           if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -415,13 +415,13 @@ function requireNative() {
         }
       } else {
         try {
-          return require('./adiff.linux-loong64-gnu.node')
+          return require('./iris.linux-loong64-gnu.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@argos-ci/adiff-linux-loong64-gnu')
-          const bindingPackageVersion = require('@argos-ci/adiff-linux-loong64-gnu/package.json').version
+          const binding = require('@argos-ci/iris-linux-loong64-gnu')
+          const bindingPackageVersion = require('@argos-ci/iris-linux-loong64-gnu/package.json').version
           if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -433,13 +433,13 @@ function requireNative() {
     } else if (process.arch === 'riscv64') {
       if (isMusl()) {
         try {
-          return require('./adiff.linux-riscv64-musl.node')
+          return require('./iris.linux-riscv64-musl.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@argos-ci/adiff-linux-riscv64-musl')
-          const bindingPackageVersion = require('@argos-ci/adiff-linux-riscv64-musl/package.json').version
+          const binding = require('@argos-ci/iris-linux-riscv64-musl')
+          const bindingPackageVersion = require('@argos-ci/iris-linux-riscv64-musl/package.json').version
           if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -449,13 +449,13 @@ function requireNative() {
         }
       } else {
         try {
-          return require('./adiff.linux-riscv64-gnu.node')
+          return require('./iris.linux-riscv64-gnu.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@argos-ci/adiff-linux-riscv64-gnu')
-          const bindingPackageVersion = require('@argos-ci/adiff-linux-riscv64-gnu/package.json').version
+          const binding = require('@argos-ci/iris-linux-riscv64-gnu')
+          const bindingPackageVersion = require('@argos-ci/iris-linux-riscv64-gnu/package.json').version
           if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -466,13 +466,13 @@ function requireNative() {
       }
     } else if (process.arch === 'ppc64') {
       try {
-        return require('./adiff.linux-ppc64-gnu.node')
+        return require('./iris.linux-ppc64-gnu.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@argos-ci/adiff-linux-ppc64-gnu')
-        const bindingPackageVersion = require('@argos-ci/adiff-linux-ppc64-gnu/package.json').version
+        const binding = require('@argos-ci/iris-linux-ppc64-gnu')
+        const bindingPackageVersion = require('@argos-ci/iris-linux-ppc64-gnu/package.json').version
         if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -482,13 +482,13 @@ function requireNative() {
       }
     } else if (process.arch === 's390x') {
       try {
-        return require('./adiff.linux-s390x-gnu.node')
+        return require('./iris.linux-s390x-gnu.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@argos-ci/adiff-linux-s390x-gnu')
-        const bindingPackageVersion = require('@argos-ci/adiff-linux-s390x-gnu/package.json').version
+        const binding = require('@argos-ci/iris-linux-s390x-gnu')
+        const bindingPackageVersion = require('@argos-ci/iris-linux-s390x-gnu/package.json').version
         if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -502,13 +502,13 @@ function requireNative() {
   } else if (process.platform === 'openharmony') {
     if (process.arch === 'arm64') {
       try {
-        return require('./adiff.openharmony-arm64.node')
+        return require('./iris.openharmony-arm64.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@argos-ci/adiff-openharmony-arm64')
-        const bindingPackageVersion = require('@argos-ci/adiff-openharmony-arm64/package.json').version
+        const binding = require('@argos-ci/iris-openharmony-arm64')
+        const bindingPackageVersion = require('@argos-ci/iris-openharmony-arm64/package.json').version
         if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -518,13 +518,13 @@ function requireNative() {
       }
     } else if (process.arch === 'x64') {
       try {
-        return require('./adiff.openharmony-x64.node')
+        return require('./iris.openharmony-x64.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@argos-ci/adiff-openharmony-x64')
-        const bindingPackageVersion = require('@argos-ci/adiff-openharmony-x64/package.json').version
+        const binding = require('@argos-ci/iris-openharmony-x64')
+        const bindingPackageVersion = require('@argos-ci/iris-openharmony-x64/package.json').version
         if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -534,13 +534,13 @@ function requireNative() {
       }
     } else if (process.arch === 'arm') {
       try {
-        return require('./adiff.openharmony-arm.node')
+        return require('./iris.openharmony-arm.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@argos-ci/adiff-openharmony-arm')
-        const bindingPackageVersion = require('@argos-ci/adiff-openharmony-arm/package.json').version
+        const binding = require('@argos-ci/iris-openharmony-arm')
+        const bindingPackageVersion = require('@argos-ci/iris-openharmony-arm/package.json').version
         if (bindingPackageVersion !== '0.1.0' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -657,10 +657,10 @@ if (!nativeBinding || forceWasi) {
     let candidateError = null
     let candidateFailed = false
     try {
-      candidateError = __napiWasiResolveCandidate('./adiff.wasi.cjs', false, ['./adiff.wasm32-wasi.debug.wasm', './adiff.wasm32-wasi.wasm'])
+      candidateError = __napiWasiResolveCandidate('./iris.wasi.cjs', false, ['./iris.wasm32-wasi.debug.wasm', './iris.wasm32-wasi.wasm'])
       candidateFailed = candidateError !== null
       if (!candidateFailed) {
-        wasiBinding = require('./adiff.wasi.cjs')
+        wasiBinding = require('./iris.wasi.cjs')
         nativeBinding = wasiBinding
         __napiLoadedBindingTarget = 'wasm32-wasi'
         wasiBindingLoaded = true
@@ -678,16 +678,16 @@ if (!nativeBinding || forceWasi) {
     let candidateError = null
     let candidateFailed = false
     try {
-      candidateError = __napiWasiResolveCandidate('@argos-ci/adiff-wasm32-wasi', true, undefined)
+      candidateError = __napiWasiResolveCandidate('@argos-ci/iris-wasm32-wasi', true, undefined)
       candidateFailed = candidateError !== null
       if (!candidateFailed) {
         if (process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          const bindingPackageVersion = require('@argos-ci/adiff-wasm32-wasi/package.json').version
+          const bindingPackageVersion = require('@argos-ci/iris-wasm32-wasi/package.json').version
           if (bindingPackageVersion !== '0.1.0') {
             throw new Error(`WASI binding package version mismatch, expected 0.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
         }
-        wasiBinding = require('@argos-ci/adiff-wasm32-wasi')
+        wasiBinding = require('@argos-ci/iris-wasm32-wasi')
         nativeBinding = wasiBinding
         __napiLoadedBindingTarget = 'wasm32-wasi'
         wasiBindingLoaded = true

@@ -5,7 +5,7 @@
 
 mod support;
 
-use adiff::{compare_files, Comparison, Options};
+use iris::{compare_files, Comparison, Options};
 use support::fixtures;
 
 /// Name, sensitivity, and whether the two images differ.
@@ -120,7 +120,7 @@ fn the_mask_round_trips_through_png() {
   let result = run("tableAlpha", &Options::default());
   let mask = result.mask.unwrap();
   let png = mask.to_png().unwrap();
-  let decoded = adiff::Mask::from_png(&png).unwrap();
+  let decoded = iris::Mask::from_png(&png).unwrap();
   assert_eq!(decoded, mask);
   assert_eq!(decoded.fingerprint(), result.fingerprint.unwrap());
 }

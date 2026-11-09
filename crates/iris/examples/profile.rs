@@ -1,9 +1,9 @@
 //! Where the time goes for one pair of images.
 //!
-//!   cargo run --release -p adiff --example profile -- base.png head.png [runs]
+//!   cargo run --release -p iris --example profile -- base.png head.png [runs]
 use std::time::Instant;
 
-use adiff::{compare, Antialiasing, Image, Options};
+use iris::{compare, Antialiasing, Image, Options};
 
 fn median(runs: usize, mut work: impl FnMut()) -> f64 {
   let mut times: Vec<f64> = (0..runs)

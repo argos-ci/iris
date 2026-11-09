@@ -24,7 +24,7 @@ const runs = Number(
 const filter = args.find((arg) => !arg.startsWith("--"));
 
 const pairs = join(import.meta.dirname, "../fixtures/pairs");
-const scratch = await mkdtemp(join(tmpdir(), "adiff-bench-"));
+const scratch = await mkdtemp(join(tmpdir(), "iris-bench-"));
 
 async function legacy(base, head) {
   const result = await legacyDiff(base, head, 0.5, scratch);
@@ -39,9 +39,9 @@ async function legacy(base, head) {
 
 const candidates = {
   "odiff x2 + fingerprint": legacy,
-  adiff: (base, head) =>
+  iris: (base, head) =>
     diff(base, head, { output: join(scratch, "mask.png") }),
-  "adiff, subpixel": (base, head) =>
+  "iris, subpixel": (base, head) =>
     diff(base, head, {
       output: join(scratch, "mask.png"),
       antialiasing: "subpixel",
@@ -89,7 +89,7 @@ for (const name of (await readdir(pairs)).sort()) {
     times[label] = await median(() => run(base, head));
     row[`${label} (ms)`] = times[label].toFixed(1);
   }
-  row.speedup = `${(times["odiff x2 + fingerprint"] / times.adiff).toFixed(1)}x`;
+  row.speedup = `${(times["odiff x2 + fingerprint"] / times.iris).toFixed(1)}x`;
   rows.push({ row, times });
   console.error(`${name}: ${row.speedup}`);
 }
@@ -97,7 +97,7 @@ for (const name of (await readdir(pairs)).sort()) {
 console.table(rows.map(({ row }) => row));
 
 const total = (label) => rows.reduce((sum, { times }) => sum + times[label], 0);
-const [before, after] = [total("odiff x2 + fingerprint"), total("adiff")];
+const [before, after] = [total("odiff x2 + fingerprint"), total("iris")];
 console.log(
   `total: ${before.toFixed(0)} ms -> ${after.toFixed(0)} ms (${(before / after).toFixed(1)}x), median of ${runs} runs each`,
 );

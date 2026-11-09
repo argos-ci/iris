@@ -8,7 +8,7 @@
 
 mod support;
 
-use adiff::{compare, compare_files, Antialiasing, Image, Options, Tier};
+use iris::{compare, compare_files, Antialiasing, Image, Options, Tier};
 use support::{fixtures, image_from_fn};
 
 type Color = [u8; 3];

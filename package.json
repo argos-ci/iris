@@ -1,12 +1,12 @@
 {
-  "name": "@argos-ci/adiff",
+  "name": "@argos-ci/iris",
   "version": "0.1.0",
   "description": "Single-pass screenshot comparison for Node.js: multi-threshold pixel diff with anti-aliasing detection, diff fingerprinting and layout-shift detection.",
   "main": "index.js",
   "types": "index.d.ts",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/argos-ci/adiff.git"
+    "url": "git+ssh://git@github.com/argos-ci/iris.git"
   },
   "license": "MIT",
   "keywords": [
@@ -22,7 +22,7 @@
     "index.js"
   ],
   "napi": {
-    "binaryName": "adiff",
+    "binaryName": "iris",
     "targets": [
       "x86_64-apple-darwin",
       "aarch64-apple-darwin",
@@ -48,7 +48,7 @@
     "prepublishOnly": "napi prepublish -t npm",
     "test": "pnpm test:rust && pnpm test:node",
     "test:node": "vitest run",
-    "test:rust": "ODIFF_BIN=$(node scripts/odiff-path.mjs) REQUIRE_ODIFF=1 cargo test -p adiff",
+    "test:rust": "ODIFF_BIN=$(node scripts/odiff-path.mjs) REQUIRE_ODIFF=1 cargo test -p iris",
     "version": "napi version"
   },
   "packageManager": "pnpm@10.33.4",

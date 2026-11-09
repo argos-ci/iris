@@ -1,20 +1,20 @@
 [workspace]
-members = [".", "crates/adiff"]
+members = [".", "crates/iris"]
 resolver = "2"
 
 [package]
-name = "adiff-node"
+name = "iris-node"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Node.js bindings for adiff"
+description = "Node.js bindings for iris"
 publish = false
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-adiff = { path = "crates/adiff" }
+iris = { path = "crates/iris" }
 napi = "3"
 napi-derive = "3"
 sha2 = "0.10"

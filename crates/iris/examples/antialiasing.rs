@@ -1,10 +1,10 @@
 //! Compare the anti-aliasing detectors on the screenshot fixtures: how many
 //! differing pixels each one leaves, at both of the default tiers.
 //!
-//!   cargo run --release -p adiff --example antialiasing
+//!   cargo run --release -p iris --example antialiasing
 use std::path::PathBuf;
 
-use adiff::{compare_files, Antialiasing, Options};
+use iris::{compare_files, Antialiasing, Options};
 
 fn main() {
   let pairs = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/pairs");

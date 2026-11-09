@@ -8,7 +8,7 @@
 //! decoded twice and no intermediate image is written.
 //!
 //! ```no_run
-//! use adiff::{compare_files, Options};
+//! use iris::{compare_files, Options};
 //!
 //! let result = compare_files("base.png", "head.png", &Options::default())?;
 //! if let Some(mask) = &result.mask {
