@@ -1,0 +1,6 @@
+target
+node_modules
+fixtures
+index.js
+index.d.ts
+pnpm-lock.yaml

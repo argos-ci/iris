@@ -1,0 +1,18 @@
+[package]
+name = "adiff"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Single-pass screenshot comparison: multi-threshold pixel diff with anti-aliasing detection, diff fingerprinting and layout-shift detection."
+repository = "https://github.com/argos-ci/adiff"
+keywords = ["image", "diff", "visual-regression", "screenshot", "fingerprint"]
+categories = ["multimedia::images"]
+
+[features]
+default = ["jpeg"]
+jpeg = ["dep:zune-jpeg"]
+
+[dependencies]
+bytemuck = "1"
+png = "0.18"
+zune-jpeg = { version = "0.5", optional = true }
