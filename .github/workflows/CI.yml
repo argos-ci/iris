@@ -296,6 +296,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # npm prefers trusted publishing and falls back to this token. A
+          # package can only be set up for trusted publishing once it exists,
+          # so the token is for first releases: delete the secret afterwards.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if [ "${{ github.event.pull_request.head.repo.fork }}" = "true" ]
           then
@@ -307,6 +311,9 @@ jobs:
           FIRST_LINE="$(printf '%s' "$MESSAGE" | head -n 1 | tr -d '\r')"
 
           echo "Latest commit: $FIRST_LINE"
+
+          # Also covers the platform packages napi publishes on its own.
+          npm config set provenance true
 
           if printf '%s' "$FIRST_LINE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
           then
