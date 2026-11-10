@@ -28,6 +28,7 @@ mod mask;
 mod options;
 mod shift;
 mod subpixel;
+mod view;
 
 use std::path::Path;
 
@@ -54,6 +55,9 @@ fn join<A: Send, B: Send>(first: impl FnOnce() -> A + Send, second: impl FnOnce(
 /// Decode two encoded images, on two threads, and compare them. Decoding is
 /// most of the work, so this is close to twice as fast as doing it in turn.
 pub fn compare_buffers(base: &[u8], head: &[u8], options: &Options) -> Result<Comparison> {
+  if options.max_pixels.is_some() {
+    compare::check_canvas(options, Image::dimensions(base)?, Image::dimensions(head)?)?;
+  }
   let (base, head) = join(|| Image::decode(base), || Image::decode(head));
   compare(&base?, &head?, options)
 }
@@ -65,6 +69,13 @@ pub fn compare_files(
   options: &Options,
 ) -> Result<Comparison> {
   let (base, head) = (base.as_ref(), head.as_ref());
+  if options.max_pixels.is_some() {
+    compare::check_canvas(
+      options,
+      Image::file_dimensions(base)?,
+      Image::file_dimensions(head)?,
+    )?;
+  }
   let (base, head) = join(|| Image::open(base), || Image::open(head));
   compare(&base?, &head?, options)
 }

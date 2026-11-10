@@ -12,14 +12,7 @@
 //! first — because the result has to match pixel for pixel.
 
 use crate::delta::brightness;
-
-/// A borrowed image, both images of a comparison sharing one size.
-#[derive(Clone, Copy)]
-pub(crate) struct View<'a> {
-  pub pixels: &'a [u32],
-  pub width: usize,
-  pub height: usize,
-}
+use crate::view::View;
 
 /// The 3x3 block of pixels centred on a pixel, row by row. Slots that fall
 /// outside the image are absent.
@@ -32,42 +25,31 @@ struct Neighbourhood {
 const ALL_PRESENT: u32 = 0x1ff;
 const CENTER: usize = 4;
 
-impl View<'_> {
-  #[inline(always)]
-  fn neighbourhood(&self, x: usize, y: usize) -> Neighbourhood {
-    let width = self.width;
-    let index = y * width + x;
-    if x >= 1 && y >= 1 && x + 1 < width && y + 1 < self.height {
-      // Three fixed-size reads: the common case, with no per-pixel checks.
-      let row = |start: usize| -> [u32; 3] {
-        self.pixels[start..start + 3]
-          .try_into()
-          .expect("three pixels")
-      };
-      let (above, level, below) = (
-        row(index - width - 1),
-        row(index - 1),
-        row(index + width - 1),
-      );
-      return Neighbourhood {
-        pixels: [
-          above[0], above[1], above[2], level[0], level[1], level[2], below[0], below[1], below[2],
-        ],
-        present: ALL_PRESENT,
-      };
-    }
-
-    let mut pixels = [0u32; 9];
-    let mut present = 0;
-    for (slot, pixel) in pixels.iter_mut().enumerate() {
-      let (nx, ny) = (x + slot % 3, y + slot / 3);
-      if (1..=width).contains(&nx) && (1..=self.height).contains(&ny) {
-        *pixel = self.pixels[(ny - 1) * width + nx - 1];
-        present |= 1 << slot;
-      }
-    }
-    Neighbourhood { pixels, present }
+/// The neighbourhood of `(x, y)`, clipped to the canvas. Pixels of the
+/// canvas outside the image read as transparent.
+#[inline(always)]
+fn neighbourhood(image: &View, x: usize, y: usize) -> Neighbourhood {
+  if image.surrounds(x, y) {
+    // Three fixed-size reads: the common case, with no per-pixel checks.
+    let [above, level, below] = [y - 1, y, y + 1].map(|row| image.three(x - 1, row));
+    return Neighbourhood {
+      pixels: [
+        above[0], above[1], above[2], level[0], level[1], level[2], below[0], below[1], below[2],
+      ],
+      present: ALL_PRESENT,
+    };
   }
+
+  let mut pixels = [0u32; 9];
+  let mut present = 0;
+  for (slot, pixel) in pixels.iter_mut().enumerate() {
+    let (nx, ny) = (x + slot % 3, y + slot / 3);
+    if (1..=image.width).contains(&nx) && (1..=image.height).contains(&ny) {
+      *pixel = image.at(nx - 1, ny - 1);
+      present |= 1 << slot;
+    }
+  }
+  Neighbourhood { pixels, present }
 }
 
 impl Neighbourhood {
@@ -88,14 +70,14 @@ impl Neighbourhood {
 /// puts it inside a flat area rather than on an edge.
 #[inline]
 fn has_many_siblings(image: &View, (x, y): (usize, usize)) -> bool {
-  image.neighbourhood(x, y).equal_neighbours() >= 3
+  neighbourhood(image, x, y).equal_neighbours() >= 3
 }
 
 /// Whether the pixel at `(x, y)` of `image` is anti-aliasing, judged against
 /// the same neighbourhood in `other`.
 #[inline]
 fn detect(image: &View, other: &View, x: usize, y: usize) -> bool {
-  let around = image.neighbourhood(x, y);
+  let around = neighbourhood(image, x, y);
 
   // Most differing pixels sit in a flat area of at least one image, and are
   // settled here, on integer compares alone. odiff interleaves this count
@@ -156,11 +138,7 @@ mod tests {
   const GREY: u32 = u32::from_ne_bytes([128, 128, 128, 255]);
 
   fn view(pixels: &[u32], width: usize) -> View<'_> {
-    View {
-      pixels,
-      width,
-      height: pixels.len() / width,
-    }
+    View::whole(pixels, width)
   }
 
   /// A vertical black/white edge at `edge`, with `blend` in the column on it.

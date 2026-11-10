@@ -64,7 +64,9 @@ export interface DiffOptions {
   minShiftRows?: number
   /**
    * Refuse to compare when the larger width times the larger height exceeds
-   * this many pixels.
+   * this many pixels. Checked from the image headers, before anything is
+   * decoded. A comparison holds both images, 4 bytes a pixel each, and a
+   * quarter of a byte per pixel of the canvas besides.
    */
   maxPixels?: number
   /**

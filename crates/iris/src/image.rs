@@ -1,4 +1,5 @@
-use std::io::Cursor;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Cursor, Read, Seek};
 use std::path::Path;
 
 use crate::error::{Error, Result};
@@ -55,23 +56,56 @@ impl Image {
 
   /// Decode a PNG or a JPEG, told apart by their signature.
   pub fn decode(bytes: &[u8]) -> Result<Self> {
-    if bytes.starts_with(&PNG_SIGNATURE) {
-      return decode_png(bytes);
+    match Format::of(bytes)? {
+      Format::Png => decode_png(Cursor::new(bytes)),
+      Format::Jpeg => decode_jpeg(bytes),
     }
-    if bytes.starts_with(&JPEG_SIGNATURE) {
-      return decode_jpeg(bytes);
-    }
-    Err(Error::UnsupportedFormat)
   }
 
-  /// Read and decode a file.
+  /// Read and decode a file. A PNG is decoded as it is read, without holding
+  /// the file in memory.
   pub fn open(path: impl AsRef<Path>) -> Result<Self> {
     let path = path.as_ref();
-    let bytes = std::fs::read(path).map_err(|source| Error::Io {
+    let io_error = |source| Error::Io {
       path: path.to_path_buf(),
       source,
-    })?;
-    Self::decode(&bytes)
+    };
+    let mut reader = BufReader::new(File::open(path).map_err(io_error)?);
+    match Format::of(reader.fill_buf().map_err(io_error)?)? {
+      Format::Png => decode_png(reader),
+      Format::Jpeg => {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).map_err(io_error)?;
+        decode_jpeg(&bytes)
+      }
+    }
+  }
+
+  /// Width and height of an encoded image, read from its header alone.
+  pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+    match Format::of(bytes)? {
+      Format::Png => png_dimensions(Cursor::new(bytes)),
+      Format::Jpeg => jpeg_dimensions(bytes),
+    }
+  }
+
+  /// Width and height of an image file, read from its header alone.
+  pub fn file_dimensions(path: impl AsRef<Path>) -> Result<(u32, u32)> {
+    let path = path.as_ref();
+    let io_error = |source| Error::Io {
+      path: path.to_path_buf(),
+      source,
+    };
+    let mut reader = BufReader::new(File::open(path).map_err(io_error)?);
+    match Format::of(reader.fill_buf().map_err(io_error)?)? {
+      Format::Png => png_dimensions(reader),
+      Format::Jpeg => {
+        // A JPEG header can sit after any number of metadata segments.
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).map_err(io_error)?;
+        jpeg_dimensions(&bytes)
+      }
+    }
   }
 
   pub fn width(&self) -> u32 {
@@ -91,23 +125,21 @@ impl Image {
   pub fn as_rgba8(&self) -> &[u8] {
     bytemuck::cast_slice(&self.pixels)
   }
+}
 
-  /// Copy the image onto a larger transparent canvas, anchored top-left.
-  pub(crate) fn padded(&self, width: u32, height: u32) -> Image {
-    debug_assert!(width >= self.width && height >= self.height);
-    let mut pixels = vec![0u32; width as usize * height as usize];
-    let src_width = self.width as usize;
-    for (src, dst) in self
-      .pixels
-      .chunks_exact(src_width)
-      .zip(pixels.chunks_exact_mut(width as usize))
-    {
-      dst[..src_width].copy_from_slice(src);
-    }
-    Image {
-      width,
-      height,
-      pixels,
+enum Format {
+  Png,
+  Jpeg,
+}
+
+impl Format {
+  fn of(bytes: &[u8]) -> Result<Self> {
+    if bytes.starts_with(&PNG_SIGNATURE) {
+      Ok(Format::Png)
+    } else if bytes.starts_with(&JPEG_SIGNATURE) {
+      Ok(Format::Jpeg)
+    } else {
+      Err(Error::UnsupportedFormat)
     }
   }
 }
@@ -119,10 +151,18 @@ fn pixel_count(width: u32, height: u32) -> Result<usize> {
     .ok_or_else(|| Error::Decode(format!("{width}x{height} does not fit in memory")))
 }
 
-fn decode_png(bytes: &[u8]) -> Result<Image> {
-  let png_error = |error: png::DecodingError| Error::Decode(error.to_string());
+fn png_error(error: png::DecodingError) -> Error {
+  Error::Decode(error.to_string())
+}
 
-  let mut decoder = png::Decoder::new(Cursor::new(bytes));
+fn png_dimensions(reader: impl BufRead + Seek) -> Result<(u32, u32)> {
+  let reader = png::Decoder::new(reader).read_info().map_err(png_error)?;
+  let info = reader.info();
+  Ok((info.width, info.height))
+}
+
+fn decode_png(reader: impl BufRead + Seek) -> Result<Image> {
+  let mut decoder = png::Decoder::new(reader);
   // The default limit is 64 MiB of decoder-side allocations, which a large
   // interlaced screenshot exceeds. The pixel buffer itself is ours.
   decoder.set_limits(png::Limits {
@@ -144,19 +184,22 @@ fn decode_png(bytes: &[u8]) -> Result<Image> {
   }
 
   let mut pixels = vec![0u32; count];
+  let bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut pixels);
   match color {
     png::ColorType::Rgba => {
-      reader
-        .next_frame(bytemuck::cast_slice_mut(&mut pixels))
-        .map_err(png_error)?;
+      reader.next_frame(bytes).map_err(png_error)?;
     }
-    // `EXPAND | ALPHA` leaves greyscale images with two channels.
+    // `EXPAND | ALPHA` leaves greyscale images with two channels. They are
+    // decoded into the first half of the buffer and widened in place, from
+    // the end: pixel `i` lands on bytes `4i..4i + 4`, past the two it is read
+    // from, so no sample is overwritten before it is read.
     png::ColorType::GrayscaleAlpha => {
-      let mut samples = vec![0u8; count * 2];
-      reader.next_frame(&mut samples).map_err(png_error)?;
-      let (samples, _) = samples.as_chunks::<2>();
-      for (pixel, &[grey, alpha]) in pixels.iter_mut().zip(samples) {
-        *pixel = u32::from_ne_bytes([grey, grey, grey, alpha]);
+      reader
+        .next_frame(&mut bytes[..count * 2])
+        .map_err(png_error)?;
+      for index in (0..count).rev() {
+        let (grey, alpha) = (bytes[2 * index], bytes[2 * index + 1]);
+        bytes[4 * index..4 * index + 4].copy_from_slice(&[grey, grey, grey, alpha]);
       }
     }
     other => {
@@ -168,20 +211,46 @@ fn decode_png(bytes: &[u8]) -> Result<Image> {
 }
 
 #[cfg(feature = "jpeg")]
-fn decode_jpeg(bytes: &[u8]) -> Result<Image> {
+fn jpeg_error(error: zune_jpeg::errors::DecodeErrors) -> Error {
+  Error::Decode(error.to_string())
+}
+
+#[cfg(feature = "jpeg")]
+fn jpeg_decoder(
+  bytes: &[u8],
+) -> zune_jpeg::JpegDecoder<zune_jpeg::zune_core::bytestream::ZCursor<&[u8]>> {
   use zune_jpeg::zune_core::bytestream::ZCursor;
   use zune_jpeg::zune_core::colorspace::ColorSpace;
   use zune_jpeg::zune_core::options::DecoderOptions;
 
-  let jpeg_error = |error: zune_jpeg::errors::DecodeErrors| Error::Decode(error.to_string());
-
   let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
-  let mut decoder = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), options);
-  let rgba = decoder.decode().map_err(jpeg_error)?;
-  let info = decoder
-    .info()
+  zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), options)
+}
+
+#[cfg(feature = "jpeg")]
+fn jpeg_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+  let mut decoder = jpeg_decoder(bytes);
+  decoder.decode_headers().map_err(jpeg_error)?;
+  let (width, height) = decoder
+    .dimensions()
     .ok_or_else(|| Error::Decode("missing JPEG header".into()))?;
-  Image::from_rgba8(info.width as u32, info.height as u32, &rgba)
+  Ok((width as u32, height as u32))
+}
+
+#[cfg(feature = "jpeg")]
+fn decode_jpeg(bytes: &[u8]) -> Result<Image> {
+  let (width, height) = jpeg_dimensions(bytes)?;
+  let mut pixels = vec![0u32; pixel_count(width, height)?];
+  // Straight into the pixels: `decode` would return a byte vector to copy.
+  jpeg_decoder(bytes)
+    .decode_into(bytemuck::cast_slice_mut(&mut pixels))
+    .map_err(jpeg_error)?;
+  Image::new(width, height, pixels)
+}
+
+#[cfg(not(feature = "jpeg"))]
+fn jpeg_dimensions(_bytes: &[u8]) -> Result<(u32, u32)> {
+  Err(Error::UnsupportedFormat)
 }
 
 #[cfg(not(feature = "jpeg"))]
@@ -208,12 +277,22 @@ mod tests {
   }
 
   #[test]
-  fn pads_top_left_with_transparent_pixels() {
-    let image = Image::from_rgba8(2, 1, &[1, 1, 1, 255, 2, 2, 2, 255]).unwrap();
-    let padded = image.padded(3, 2);
-    assert_eq!((padded.width(), padded.height()), (3, 2));
-    assert_eq!(&padded.pixels()[..2], image.pixels());
-    assert!(padded.pixels()[2..].iter().all(|&pixel| pixel == 0));
+  fn reads_dimensions_from_the_header() {
+    let image = Image::from_rgba8(3, 2, &[7; 24]).unwrap();
+    let mut png = Vec::new();
+    {
+      let mut encoder = png::Encoder::new(&mut png, 3, 2);
+      encoder.set_color(png::ColorType::Rgba);
+      encoder.set_depth(png::BitDepth::Eight);
+      let mut writer = encoder.write_header().unwrap();
+      writer.write_image_data(image.as_rgba8()).unwrap();
+      writer.finish().unwrap();
+    }
+    assert_eq!(Image::dimensions(&png).unwrap(), (3, 2));
+    assert!(matches!(
+      Image::dimensions(b"GIF89a"),
+      Err(Error::UnsupportedFormat)
+    ));
   }
 
   #[test]

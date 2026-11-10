@@ -28,8 +28,8 @@
 //! colour, a pixel that is not a mix of its two sides, a side that changed:
 //! none of them fit, and all of them are reported.
 
-use crate::antialias::View;
 use crate::delta::color_delta;
+use crate::view::View;
 
 /// Furthest an edge or a stroke may move, in pixels, and still be the same
 /// shape rendered differently. A layout change moves things by whole pixels.
@@ -185,15 +185,15 @@ fn is_same_stroke(span: &Span, background: Rgb) -> bool {
 /// still count as unchanged.
 pub(crate) fn is_subpixel_shift(base: &View, head: &View, x: usize, y: usize, same: i64) -> bool {
   let (width, height) = (base.width as isize, base.height as isize);
-  let index_at = |dx: isize, dy: isize, step: isize| -> Option<usize> {
+  let point = |dx: isize, dy: isize, step: isize| -> Option<(usize, usize)> {
     let (nx, ny) = (x as isize + dx * step, y as isize + dy * step);
-    (nx >= 0 && ny >= 0 && nx < width && ny < height).then(|| (ny * width + nx) as usize)
+    (nx >= 0 && ny >= 0 && nx < width && ny < height).then_some((nx as usize, ny as usize))
   };
-  let unchanged = |index: usize| color_delta(base.pixels[index], head.pixels[index]) <= same;
+  let unchanged = |(px, py): (usize, usize)| color_delta(base.at(px, py), head.at(px, py)) <= same;
 
   for (before, after) in REACHES {
     for (dx, dy) in AXES {
-      let (Some(from), Some(to)) = (index_at(dx, dy, -before), index_at(dx, dy, after)) else {
+      let (Some(from), Some(to)) = (point(dx, dy, -before), point(dx, dy, after)) else {
         continue;
       };
       if !unchanged(from) || !unchanged(to) {
@@ -206,16 +206,16 @@ pub(crate) fn is_subpixel_shift(base: &View, head: &View, x: usize, y: usize, sa
         length: 0,
       };
       for step in 1 - before..after {
-        // Between two points inside the image, so inside it too.
-        let Some(index) = index_at(dx, dy, step) else {
+        // Between two points on the canvas, so on it too.
+        let Some((px, py)) = point(dx, dy, step) else {
           continue;
         };
-        span.base[span.length] = rgb(base.pixels[index]);
-        span.head[span.length] = rgb(head.pixels[index]);
+        span.base[span.length] = rgb(base.at(px, py));
+        span.head[span.length] = rgb(head.at(px, py));
         span.length += 1;
       }
 
-      let (from_pixel, to_pixel) = (base.pixels[from], base.pixels[to]);
+      let (from_pixel, to_pixel) = (base.at(from.0, from.1), base.at(to.0, to.1));
       let explained = if color_delta(from_pixel, to_pixel) > same {
         is_same_edge(&span, rgb(from_pixel), rgb(to_pixel))
       } else {

@@ -202,6 +202,21 @@ describe("diff", () => {
     expect(auto).toEqual(one);
   });
 
+  test("gives its memory back between calls", async () => {
+    const { base, head } = pair("big-images");
+    const run = () =>
+      diff(base, head, { output: join(scratch, "repeated.png") });
+    for (let index = 0; index < 5; index++) {
+      await run();
+    }
+    const before = process.memoryUsage().rss;
+    for (let index = 0; index < 20; index++) {
+      await run();
+    }
+    // A call holds about 35 MB; keeping it would grow the process by 700 MB.
+    expect(process.memoryUsage().rss - before).toBeLessThan(150 * 1024 * 1024);
+  });
+
   test("detects content that moved", async () => {
     const line = (seed: number) => (x: number, y: number) =>
       y < 12 &&

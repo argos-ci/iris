@@ -44,45 +44,9 @@ impl Mask {
     Self::assemble(width, height, bits, extent)
   }
 
-  /// Keep the pixels of `classes` (one byte per pixel) that reach `min_class`.
-  /// Only `within` is read, which the caller guarantees holds every non-zero
-  /// class.
-  pub(crate) fn from_classes(
-    classes: &[u8],
-    width: u32,
-    height: u32,
-    min_class: u8,
-    within: Rect,
-  ) -> Self {
-    let stride = (width as usize).div_ceil(8);
-    let mut bits = vec![0u8; stride * height as usize];
-    let mut extent = Extent::default();
-    // Whole bytes covering `within`: eight classes in, one byte out.
-    let first_byte = within.x as usize / 8;
-    let last_byte = (within.x + within.width - 1) as usize / 8;
-
-    for y in within.y as usize..(within.y + within.height) as usize {
-      let source = &classes[y * width as usize..][..width as usize];
-      let row = &mut bits[y * stride..][..stride];
-      let mut set_bytes: Option<(usize, usize)> = None;
-      for byte in first_byte..=last_byte {
-        let group = &source[byte * 8..(byte * 8 + 8).min(source.len())];
-        let mut packed = 0u8;
-        for (bit, &class) in group.iter().enumerate() {
-          packed |= u8::from(class >= min_class) << (7 - bit);
-        }
-        if packed != 0 {
-          row[byte] = packed;
-          extent.count += packed.count_ones() as u64;
-          set_bytes = Some((set_bytes.map_or(byte, |(first, _)| first), byte));
-        }
-      }
-      if let Some((first, last)) = set_bytes {
-        let left = first * 8 + row[first].leading_zeros() as usize;
-        let right = last * 8 + 7 - row[last].trailing_zeros() as usize;
-        extent.include_row(y, left, right);
-      }
-    }
+  /// Wrap packed rows, `extent` describing the bits set in them.
+  pub(crate) fn from_bits(width: u32, height: u32, bits: Vec<u8>, extent: Extent) -> Self {
+    debug_assert_eq!(bits.len(), (width as usize).div_ceil(8) * height as usize);
     Self::assemble(width, height, bits, extent)
   }
 
@@ -240,8 +204,9 @@ fn is_truncation(error: &png::DecodingError) -> bool {
   }
 }
 
-#[derive(Clone, Copy)]
-struct Extent {
+/// Where the set pixels of a mask are, and how many there are.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Extent {
   min_x: usize,
   min_y: usize,
   max_x: usize,
@@ -263,7 +228,7 @@ impl Default for Extent {
 
 impl Extent {
   #[inline(always)]
-  fn include(&mut self, x: usize, y: usize) {
+  pub(crate) fn include(&mut self, x: usize, y: usize) {
     self.min_x = self.min_x.min(x);
     self.max_x = self.max_x.max(x);
     self.min_y = self.min_y.min(y);
@@ -271,13 +236,15 @@ impl Extent {
     self.count += 1;
   }
 
-  /// Widen to a row whose first and last set pixels are known. The caller
-  /// keeps `count`.
-  fn include_row(&mut self, y: usize, left: usize, right: usize) {
-    self.min_x = self.min_x.min(left);
-    self.max_x = self.max_x.max(right);
-    self.min_y = self.min_y.min(y);
-    self.max_y = self.max_y.max(y);
+  pub(crate) fn merge(&mut self, other: &Extent) {
+    if other.count == 0 {
+      return;
+    }
+    self.min_x = self.min_x.min(other.min_x);
+    self.max_x = self.max_x.max(other.max_x);
+    self.min_y = self.min_y.min(other.min_y);
+    self.max_y = self.max_y.max(other.max_y);
+    self.count += other.count;
   }
 
   fn rect(&self) -> Option<Rect> {
@@ -330,56 +297,26 @@ mod tests {
   }
 
   #[test]
-  fn selects_classes_at_or_above_the_minimum() {
-    let classes = [0, 1, 2, 0, 2, 1, 0, 0, 1, 2, 2, 0];
-    let within = Rect {
-      x: 0,
-      y: 0,
-      width: 4,
-      height: 3,
-    };
-    let any = Mask::from_classes(&classes, 4, 3, 1, within);
-    let strict = Mask::from_classes(&classes, 4, 3, 2, within);
-    assert_eq!((any.count(), strict.count()), (7, 4));
-    assert!(any.is_set(1, 0) && !strict.is_set(1, 0));
-    assert!(strict.is_set(2, 0) && strict.is_set(0, 1) && strict.is_set(1, 2));
-  }
-
-  #[test]
-  fn packs_classes_like_a_pixel_by_pixel_copy() {
-    // Odd widths, and windows that start and end inside a byte.
-    let mut state = 0x9e3779b97f4a7c15u64;
-    for (width, height) in [
-      (1u32, 1u32),
-      (7, 3),
-      (8, 2),
-      (9, 5),
-      (31, 4),
-      (64, 3),
-      (77, 9),
-    ] {
-      let classes: Vec<u8> = (0..width * height)
-        .map(|_| {
-          state ^= state << 13;
-          state ^= state >> 7;
-          state ^= state << 17;
-          (state % 4) as u8
-        })
-        .collect();
-      for min_class in 1..=3u8 {
-        let within = Rect {
-          x: 0,
-          y: 0,
-          width,
-          height,
-        };
-        let packed = Mask::from_classes(&classes, width, height, min_class, within);
-        let expected = Mask::from_fn(width, height, |x, y| {
-          classes[(y * width + x) as usize] >= min_class
-        });
-        assert_eq!(packed, expected, "{width}x{height}, class {min_class}");
-      }
-    }
+  fn merges_extents() {
+    let mut extent = Extent::default();
+    let (mut left, mut right) = (Extent::default(), Extent::default());
+    left.include(2, 9);
+    right.include(7, 1);
+    right.include(4, 3);
+    extent.merge(&left);
+    extent.merge(&Extent::default());
+    extent.merge(&right);
+    assert_eq!(extent.count, 3);
+    assert_eq!(
+      extent.rect(),
+      Some(Rect {
+        x: 2,
+        y: 1,
+        width: 6,
+        height: 9
+      })
+    );
+    assert_eq!(Extent::default().rect(), None);
   }
 
   #[test]

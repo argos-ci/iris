@@ -145,7 +145,7 @@ fingerprintDiff(png): Promise<string>
 | `fingerprint`  | `true`      |                                                                   |
 | `shifts`       | `true`      |                                                                   |
 | `minShiftRows` | `4`         | fewest rows that must move together                               |
-| `maxPixels`    |             | reject canvases over this size; a pixel costs 9 bytes             |
+| `maxPixels`    |             | reject canvases over this size, before decoding                   |
 | `threads`      | up to 4     | for the scan, above a megapixel; the result does not depend on it |
 | `output`       |             | write the mask there instead of returning it in `mask.data`       |
 
@@ -200,6 +200,36 @@ with its hash and fingerprint (`pnpm bench`):
 All 19 fixtures: 3.9 s before, 0.65 s after. Where little differs the time
 left is PNG decoding; `imageCompression7` is two noisy 2.7 megapixel PNGs that
 take 16 ms each to inflate.
+
+### Memory
+
+A comparison holds the two decoded images, 4 bytes a pixel each, and a
+quarter of a byte per pixel of the canvas: one bit per tier, the reported bit
+plane becoming the mask. Nothing else grows with the image:
+
+- images of different sizes are read in place, never copied onto a padded
+  canvas;
+- PNG files are decoded as they are read, greyscale ones widened in place, and
+  JPEG decoded straight into the pixel buffer;
+- with `maxPixels`, an oversized pair — or a decompression bomb — is refused
+  from the headers, before a pixel buffer exists.
+
+[`tests/memory.rs`](crates/iris/tests/memory.rs) counts every allocation and
+fails when one of these grows past its budget, and a Node.js test checks that
+repeated calls give their memory back.
+
+The old pipeline ran two odiff processes at once, each holding both images
+and an RGBA diff. Peak resident memory, measured with `/usr/bin/time -l`:
+
+| fixture             | megapixels | odiff ×2 | iris   |
+| ------------------- | ---------- | -------- | ------ |
+| `simple`            | 1.6        | 44 MiB   | 14 MiB |
+| `tableAlpha`        | 2.1        | 54 MiB   | 17 MiB |
+| `imageCompression7` | 2.7        | 68 MiB   | 22 MiB |
+| `big-images`        | 4.5        | 108 MiB  | 34 MiB |
+
+iris is measured above a Node.js process with the addon loaded; the odiff
+figures leave out `sharp` and the fingerprinting process.
 
 ## Rust
 

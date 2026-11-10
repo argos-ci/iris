@@ -20,8 +20,8 @@
 
 use std::collections::HashMap;
 
-use crate::antialias::View;
 use crate::mask::{Mask, Rect};
+use crate::view::{Row, View};
 
 /// Columns without a difference narrower than this do not split a strip:
 /// the gap between two words is not the gap between two page columns.
@@ -69,9 +69,6 @@ pub struct ShiftReport {
 pub(crate) struct Input<'a> {
   pub base: View<'a>,
   pub head: View<'a>,
-  /// Size of each image before padding to the common canvas.
-  pub base_size: (usize, usize),
-  pub head_size: (usize, usize),
   /// First and last row where the images differ.
   pub raw_rows: (usize, usize),
   /// Bitset of the columns where the images differ.
@@ -113,7 +110,7 @@ fn strips(columns: &[u64], width: usize) -> Vec<(usize, usize)> {
 
 /// A row reduced to what matching needs.
 #[derive(Clone, Copy)]
-struct Row {
+struct Signature {
   hash: u64,
   /// One colour across the strip. Flat rows are everywhere, so they can
   /// travel with a block but never anchor one.
@@ -122,25 +119,32 @@ struct Row {
   void: bool,
 }
 
-fn signature(pixels: &[u32], void: bool) -> Row {
+fn signature(row: Row, void: bool) -> Signature {
   const MULTIPLIER: u64 = 0x517cc1b727220a95;
-  let first = pixels[0];
+  let length = row.pixels.len() + row.zeros;
+  let mut pixels = row.iter();
+  let first = row.pixels.first().copied().unwrap_or(0);
   let mut varies = 0u32;
-  let mut hash = 0x9e3779b97f4a7c15u64 ^ pixels.len() as u64;
-  // Two pixels per multiplication.
-  let (pairs, rest) = pixels.as_chunks::<2>();
-  for &[left, right] in pairs {
-    varies |= (left ^ first) | (right ^ first);
-    hash = (hash.rotate_left(5) ^ (left as u64 | (right as u64) << 32)).wrapping_mul(MULTIPLIER);
-  }
-  for &pixel in rest {
-    varies |= pixel ^ first;
-    hash = (hash.rotate_left(5) ^ pixel as u64).wrapping_mul(MULTIPLIER);
+  let mut hash = 0x9e3779b97f4a7c15u64 ^ length as u64;
+  // Two pixels per multiplication, paired the same way wherever the image
+  // ends, so equal rows hash equal.
+  while let Some(left) = pixels.next() {
+    let word = match pixels.next() {
+      Some(right) => {
+        varies |= (left ^ first) | (right ^ first);
+        left as u64 | (right as u64) << 32
+      }
+      None => {
+        varies |= left ^ first;
+        left as u64
+      }
+    };
+    hash = (hash.rotate_left(5) ^ word).wrapping_mul(MULTIPLIER);
   }
   hash ^= hash >> 32;
   hash = hash.wrapping_mul(0xd6e8feb86659fd93);
   hash ^= hash >> 32;
-  Row {
+  Signature {
     hash,
     flat: varies == 0,
     void,
@@ -166,15 +170,9 @@ enum HeadRow {
   Shifted,
 }
 
-/// Columns `x0..=x1` of row `y`.
-fn strip_row<'a>(view: &View<'a>, x0: usize, x1: usize, y: usize) -> &'a [u32] {
-  let offset = y * view.width;
-  &view.pixels[offset + x0..=offset + x1]
-}
-
 fn analyse_strip<'a>(input: &Input<'a>, x0: usize, x1: usize, report: &mut ShiftReport) {
-  let base_row = |y: usize| strip_row(&input.base, x0, x1, y);
-  let head_row = |y: usize| strip_row(&input.head, x0, x1, y);
+  let base_row = |y: usize| input.base.row(y, x0, x1);
+  let head_row = |y: usize| input.head.row(y, x0, x1);
 
   // Rows that differ within this strip. Everything outside is identical in
   // place, so it can neither have moved nor hold a pixel to explain.
@@ -189,13 +187,14 @@ fn analyse_strip<'a>(input: &Input<'a>, x0: usize, x1: usize, report: &mut Shift
     return;
   }
 
-  let signatures = |row: &dyn Fn(usize) -> &'a [u32], size: (usize, usize)| -> Vec<Row> {
+  let signatures = |view: &View<'a>| -> Vec<Signature> {
+    let (image_width, image_height) = view.image_size();
     (top..=bottom)
-      .map(|y| signature(row(y), y >= size.1 || x0 >= size.0))
+      .map(|y| signature(view.row(y, x0, x1), y >= image_height || x0 >= image_width))
       .collect()
   };
-  let base = signatures(&base_row, input.base_size);
-  let head = signatures(&head_row, input.head_size);
+  let base = signatures(&input.base);
+  let head = signatures(&input.head);
 
   let mut positions: HashMap<u64, Vec<usize>> = HashMap::new();
   for (index, row) in base.iter().enumerate() {
@@ -385,15 +384,29 @@ mod tests {
     );
   }
 
+  fn row(pixels: &[u32], zeros: usize) -> Row<'_> {
+    Row { pixels, zeros }
+  }
+
   #[test]
   fn signatures_tell_rows_apart() {
-    let a = signature(&[1, 2, 3, 4], false);
-    let b = signature(&[1, 2, 4, 3], false);
-    let flat = signature(&[7, 7, 7, 7], false);
+    let a = signature(row(&[1, 2, 3, 4], 0), false);
+    let b = signature(row(&[1, 2, 4, 3], 0), false);
+    let flat = signature(row(&[7, 7, 7, 7], 0), false);
     assert_ne!(a.hash, b.hash);
-    assert_eq!(a.hash, signature(&[1, 2, 3, 4], false).hash);
+    assert_eq!(a.hash, signature(row(&[1, 2, 3, 4], 0), false).hash);
     assert!(!a.flat && flat.flat);
     // The same pixels over another width are another row.
-    assert_ne!(signature(&[7, 7], false).hash, flat.hash);
+    assert_ne!(signature(row(&[7, 7], 0), false).hash, flat.hash);
+  }
+
+  #[test]
+  fn equal_rows_hash_equal_wherever_their_image_ends() {
+    let full = signature(row(&[5, 6, 7, 0, 0], 0), false);
+    for cut in [row(&[5, 6, 7], 2), row(&[5, 6, 7, 0], 1)] {
+      assert_eq!(signature(cut, false).hash, full.hash);
+    }
+    assert!(signature(row(&[], 4), false).flat);
+    assert!(!signature(row(&[3], 3), false).flat);
   }
 }

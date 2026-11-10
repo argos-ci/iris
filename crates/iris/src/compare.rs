@@ -1,11 +1,12 @@
-use crate::antialias::{is_antialiased, View};
+use crate::antialias::is_antialiased;
 use crate::delta::{color_delta, max_delta};
 use crate::error::{Error, Result};
 use crate::image::Image;
-use crate::mask::{Mask, Rect};
+use crate::mask::{Extent, Mask};
 use crate::options::{Antialiasing, Options, MAX_TIERS};
 use crate::shift::{self, ShiftReport};
 use crate::subpixel::is_subpixel_shift;
+use crate::view::View;
 
 /// What one [`Tier`](crate::Tier) saw.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -46,13 +47,16 @@ pub struct Comparison {
 
 /// Everything one pass over the two images collects.
 struct Scan {
-  /// Per pixel, the number of tiers whose colour threshold it exceeds.
-  classes: Vec<u8>,
-  /// Pixels per class.
+  /// One bit per pixel and per tier, packed like the rows of a [`Mask`]:
+  /// plane `r` holds the pixels over the threshold of the tier of rank `r`.
+  /// A byte per pixel would do for any number of tiers, but two planes are a
+  /// quarter of that, and the reported plane becomes the mask as it is.
+  planes: Vec<Vec<u8>>,
+  /// Pixels per class: a pixel of class `c` is over the tiers of rank `0..c`.
   histogram: [u64; MAX_TIERS + 1],
+  /// Where the pixels of each class are.
+  extents: [Extent; MAX_TIERS + 1],
   antialiased: u64,
-  /// Bounds of the pixels with a non-zero class.
-  changed: Option<Rect>,
   /// First and last row where the images differ at all, however slightly.
   raw_rows: Option<(usize, usize)>,
   /// Bitset of the columns where the images differ at all.
@@ -71,42 +75,44 @@ fn chunk_is_equal(a: &[u32], b: &[u32]) -> bool {
 /// What one band of rows contributes to a [`Scan`].
 struct Band {
   histogram: [u64; MAX_TIERS + 1],
+  extents: [Extent; MAX_TIERS + 1],
   antialiased: u64,
-  /// `(min_x, max_x, min_y, max_y)` of the pixels with a non-zero class.
-  changed: Option<(usize, usize, usize, usize)>,
   raw_rows: Option<(usize, usize)>,
   raw_columns: Vec<u64>,
 }
 
 /// Classify the pixels of the rows starting at `first_row`, as many as
-/// `classes` holds, against all the tiers at once. `max_deltas` holds the
+/// `planes` hold, against all the tiers at once. `max_deltas` holds the
 /// tiers' thresholds in ascending order, so the pixels over tier `n` are a
-/// subset of those over tier `n - 1` and one counter per pixel describes them
-/// all. Anti-aliasing does not depend on the threshold, so it is decided once.
+/// subset of those over tier `n - 1`: a pixel is set in the planes of every
+/// tier up to the last one it exceeds. Anti-aliasing does not depend on the
+/// threshold, so it is decided once.
 fn scan_rows(
   base: View,
   head: View,
   first_row: usize,
-  classes: &mut [u8],
+  planes: &mut [&mut [u8]],
   max_deltas: &[i64],
   antialiasing: Antialiasing,
 ) -> Band {
   let width = base.width;
+  let stride = width.div_ceil(8);
+  let rows = planes[0].len() / stride;
   let mut histogram = [0u64; MAX_TIERS + 1];
+  let mut extents = [Extent::default(); MAX_TIERS + 1];
   let mut antialiased = 0u64;
   let mut raw_rows = None;
   let mut raw_columns = vec![0u64; width.div_ceil(64)];
-  let (mut min_x, mut max_x, mut min_y, mut max_y) = (usize::MAX, 0usize, usize::MAX, 0usize);
+  let (mut base_scratch, mut head_scratch) = (Vec::new(), Vec::new());
   let lowest = max_deltas[0];
   // What "unchanged" means to the sub-pixel detector: under the most
   // sensitive tier, and never looser than a barely visible difference.
   let same = lowest.min(max_delta(0.025));
 
-  for (row, classes) in classes.chunks_exact_mut(width).enumerate() {
+  for row in 0..rows {
     let y = first_row + row;
-    let offset = y * width;
-    let base_row = &base.pixels[offset..offset + width];
-    let head_row = &head.pixels[offset..offset + width];
+    let base_row = base.full_row(y, &mut base_scratch);
+    let head_row = head.full_row(y, &mut head_scratch);
     if base_row == head_row {
       continue;
     }
@@ -144,12 +150,12 @@ fn scan_rows(
         while class < max_deltas.len() && delta > max_deltas[class] {
           class += 1;
         }
-        classes[x] = class as u8;
+        let (byte, bit) = (row * stride + x / 8, 0x80 >> (x % 8));
+        for plane in planes[..class].iter_mut() {
+          plane[byte] |= bit;
+        }
         histogram[class] += 1;
-        min_x = min_x.min(x);
-        max_x = max_x.max(x);
-        min_y = min_y.min(y);
-        max_y = y;
+        extents[class].include(x, y);
       }
       x = end;
     }
@@ -157,8 +163,8 @@ fn scan_rows(
 
   Band {
     histogram,
+    extents,
     antialiased,
-    changed: (min_x != usize::MAX).then_some((min_x, max_x, min_y, max_y)),
     raw_rows,
     raw_columns,
   }
@@ -185,7 +191,11 @@ fn scan(
   threads: usize,
 ) -> Scan {
   let (width, height) = (base.width, base.height);
-  let mut classes = vec![0u8; width * height];
+  let stride = width.div_ceil(8);
+  let mut planes: Vec<Vec<u8>> = max_deltas
+    .iter()
+    .map(|_| vec![0u8; stride * height])
+    .collect();
 
   let threads = match threads {
     0 if width * height < PARALLEL_FROM => 1,
@@ -194,61 +204,61 @@ fn scan(
   }
   .min(height.div_ceil(BAND_ROWS));
 
-  let bands: Vec<Band> = if threads <= 1 {
-    vec![scan_rows(
-      base,
-      head,
-      0,
-      &mut classes,
-      max_deltas,
-      antialiasing,
-    )]
-  } else {
-    let queue = std::sync::Mutex::new(classes.chunks_mut(BAND_ROWS * width).enumerate());
-    let work = || {
-      let mut done = Vec::new();
-      loop {
-        // Take the lock for the time it takes to pick a band, not to scan it.
-        let next = queue.lock().expect("a scanning thread panicked").next();
-        let Some((band, classes)) = next else {
-          return done;
-        };
-        done.push(scan_rows(
-          base,
-          head,
-          band * BAND_ROWS,
-          classes,
-          max_deltas,
-          antialiasing,
-        ));
-      }
-    };
-    std::thread::scope(|scope| {
-      let workers: Vec<_> = (1..threads).map(|_| scope.spawn(work)).collect();
-      let mut bands = work();
-      for worker in workers {
-        bands.extend(
-          worker
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-        );
-      }
-      bands
-    })
+  // Band `n` gets rows `n * BAND_ROWS..` of every plane.
+  let mut work: Vec<Vec<&mut [u8]>> = (0..height.div_ceil(BAND_ROWS))
+    .map(|_| Vec::with_capacity(planes.len()))
+    .collect();
+  for plane in planes.iter_mut() {
+    for (band, rows) in plane.chunks_mut(BAND_ROWS * stride).enumerate() {
+      work[band].push(rows);
+    }
+  }
+  let queue = std::sync::Mutex::new(work.into_iter().enumerate());
+  let worker = || {
+    let mut done = Vec::new();
+    loop {
+      // Take the lock for the time it takes to pick a band, not to scan it.
+      let next = queue.lock().expect("a scanning thread panicked").next();
+      let Some((band, mut planes)) = next else {
+        return done;
+      };
+      done.push(scan_rows(
+        base,
+        head,
+        band * BAND_ROWS,
+        &mut planes,
+        max_deltas,
+        antialiasing,
+      ));
+    }
   };
+  let bands: Vec<Band> = std::thread::scope(|scope| {
+    let helpers: Vec<_> = (1..threads).map(|_| scope.spawn(worker)).collect();
+    let mut bands = worker();
+    for helper in helpers {
+      bands.extend(
+        helper
+          .join()
+          .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+      );
+    }
+    bands
+  });
 
   let mut scan = Scan {
-    classes,
+    planes,
     histogram: [0; MAX_TIERS + 1],
+    extents: [Extent::default(); MAX_TIERS + 1],
     antialiased: 0,
-    changed: None,
     raw_rows: None,
     raw_columns: vec![0u64; width.div_ceil(64)],
   };
-  let mut extent: Option<(usize, usize, usize, usize)> = None;
   for band in bands {
     for (total, count) in scan.histogram.iter_mut().zip(band.histogram) {
       *total += count;
+    }
+    for (total, extent) in scan.extents.iter_mut().zip(&band.extents) {
+      total.merge(extent);
     }
     scan.antialiased += band.antialiased;
     for (total, columns) in scan.raw_columns.iter_mut().zip(band.raw_columns) {
@@ -260,24 +270,7 @@ fn scan(
         Some((start, end)) => (start.min(first), end.max(last)),
       });
     }
-    if let Some((min_x, max_x, min_y, max_y)) = band.changed {
-      extent = Some(match extent {
-        None => (min_x, max_x, min_y, max_y),
-        Some(extent) => (
-          extent.0.min(min_x),
-          extent.1.max(max_x),
-          extent.2.min(min_y),
-          extent.3.max(max_y),
-        ),
-      });
-    }
   }
-  scan.changed = extent.map(|(min_x, max_x, min_y, max_y)| Rect {
-    x: min_x as u32,
-    y: min_y as u32,
-    width: (max_x - min_x + 1) as u32,
-    height: (max_y - min_y + 1) as u32,
-  });
   scan
 }
 
@@ -309,33 +302,33 @@ fn score(count: u64, pixels: f64, percent_decimals: Option<u8>) -> f64 {
   }
 }
 
+/// Refuse a canvas over [`Options::max_pixels`], from the sizes of the two
+/// images: callers that have not decoded them yet check before they do.
+pub(crate) fn check_canvas(options: &Options, base: (u32, u32), head: (u32, u32)) -> Result<()> {
+  let (width, height) = (base.0.max(head.0), base.1.max(head.1));
+  match options.max_pixels {
+    Some(max_pixels) if width as u64 * height as u64 > max_pixels => Err(Error::TooLarge {
+      width,
+      height,
+      max_pixels,
+    }),
+    _ => Ok(()),
+  }
+}
+
 /// Compare two decoded images.
 pub fn compare(base: &Image, head: &Image, options: &Options) -> Result<Comparison> {
   options.validate()?;
+  check_canvas(
+    options,
+    (base.width(), base.height()),
+    (head.width(), head.height()),
+  )?;
 
   let width = base.width().max(head.width());
   let height = base.height().max(head.height());
-  let pixel_count = width as u64 * height as u64;
-  if let Some(max_pixels) = options.max_pixels {
-    if pixel_count > max_pixels {
-      return Err(Error::TooLarge {
-        width,
-        height,
-        max_pixels,
-      });
-    }
-  }
-
-  let fits = |image: &Image| image.width() == width && image.height() == height;
-  let padded_base = (!fits(base)).then(|| base.padded(width, height));
-  let padded_head = (!fits(head)).then(|| head.padded(width, height));
-  let view = |pixels| View {
-    pixels,
-    width: width as usize,
-    height: height as usize,
-  };
-  let base_view = view(padded_base.as_ref().unwrap_or(base).pixels());
-  let head_view = view(padded_head.as_ref().unwrap_or(head).pixels());
+  let base_view = View::new(base, width as usize, height as usize);
+  let head_view = View::new(head, width as usize, height as usize);
 
   // Most sensitive tier first. `order[rank]` is the tier's index in the
   // options, and a pixel of class `c` is over the tiers of rank `0..c`.
@@ -400,11 +393,18 @@ pub fn compare(base: &Image, head: &Image, options: &Options) -> Result<Comparis
     shift: None,
   };
 
-  let (Some((rank, index)), Some(changed)) = (selected, scan.changed) else {
+  let Some((rank, index)) = selected else {
     return Ok(comparison);
   };
 
-  let mask = Mask::from_classes(&scan.classes, width, height, rank as u8 + 1, changed);
+  // The pixels over a tier are those of every class above its rank.
+  let mut extent = Extent::default();
+  for class in &scan.extents[rank + 1..] {
+    extent.merge(class);
+  }
+  let mut planes = scan.planes;
+  let mask = Mask::from_bits(width, height, planes.swap_remove(rank), extent);
+  drop(planes);
   comparison.score = comparison.tiers[index].score;
   comparison.diff_pixels = mask.count();
   comparison.tier = Some(index);
@@ -416,8 +416,6 @@ pub fn compare(base: &Image, head: &Image, options: &Options) -> Result<Comparis
       comparison.shift = shift::detect(&shift::Input {
         base: base_view,
         head: head_view,
-        base_size: (base.width() as usize, base.height() as usize),
-        head_size: (head.width() as usize, head.height() as usize),
         raw_rows,
         raw_columns: &scan.raw_columns,
         mask: &mask,
@@ -433,6 +431,7 @@ pub fn compare(base: &Image, head: &Image, options: &Options) -> Result<Comparis
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::mask::Rect;
   use crate::options::Tier;
 
   const WHITE: [u8; 4] = [255, 255, 255, 255];
@@ -778,6 +777,47 @@ mod tests {
       for threads in [2, 3, 7, 97, 500] {
         assert_eq!(run(threads), single, "{antialiasing:?}, {threads} threads");
       }
+    }
+  }
+
+  #[test]
+  fn reports_the_mask_of_the_tier_it_selects() {
+    // Three tiers over a gradient of changes: whichever is reported, its mask
+    // is what a comparison with that tier alone finds.
+    let (width, height) = (60u32, 40u32);
+    let base = solid(width, height, WHITE);
+    let head: Vec<[u8; 4]> = (0..width * height)
+      .map(|index| {
+        let level = 255 - ((index % width) * 4) as u8;
+        [level, level, 255, 255]
+      })
+      .collect();
+    let thresholds = [0.3, 0.05, 0.15];
+    for selected in 0..thresholds.len() {
+      let tiers = thresholds
+        .iter()
+        .enumerate()
+        .map(|(index, &threshold)| Tier {
+          threshold,
+          // Only the selected tier can report.
+          min_score: if index == selected { 0.0 } else { 1.0 },
+          max_ignored_pixels: None,
+        })
+        .collect();
+      let options = Options {
+        tiers,
+        ..any_change(0.0)
+      };
+      let result = compare(&image(width, &base), &image(width, &head), &options).unwrap();
+      let alone = compare(
+        &image(width, &base),
+        &image(width, &head),
+        &any_change(thresholds[selected]),
+      )
+      .unwrap();
+      assert_eq!(result.tier, Some(selected));
+      assert_eq!(result.mask, alone.mask, "tier {selected}");
+      assert_eq!(result.diff_pixels, alone.diff_pixels);
     }
   }
 

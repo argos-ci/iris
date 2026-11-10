@@ -75,7 +75,9 @@ pub struct Options {
   pub shifts: bool,
   /// Fewest consecutive rows that must move together to count as a shift.
   pub min_shift_rows: u32,
-  /// Refuse canvases larger than this many pixels. Each one costs nine bytes.
+  /// Refuse canvases larger than this many pixels, before decoding anything.
+  /// A comparison holds both images, four bytes a pixel each, and a quarter
+  /// of a byte per pixel of the canvas besides.
   pub max_pixels: Option<u64>,
   /// Threads the scan may use. 0 picks for itself: one below a megapixel,
   /// up to four above. The result does not depend on it.

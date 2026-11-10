@@ -55,7 +55,9 @@ pub struct JsDiffOptions {
   /// Defaults to 4.
   pub min_shift_rows: Option<u32>,
   /// Refuse to compare when the larger width times the larger height exceeds
-  /// this many pixels.
+  /// this many pixels. Checked from the image headers, before anything is
+  /// decoded. A comparison holds both images, 4 bytes a pixel each, and a
+  /// quarter of a byte per pixel of the canvas besides.
   pub max_pixels: Option<f64>,
   /// Threads the comparison may use on top of the one decoding the second
   /// image. Defaults to up to four for images over a megapixel.
