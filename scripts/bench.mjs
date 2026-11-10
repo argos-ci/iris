@@ -39,8 +39,7 @@ async function legacy(base, head) {
 
 const candidates = {
   "odiff x2 + fingerprint": legacy,
-  iris: (base, head) =>
-    diff(base, head, { output: join(scratch, "mask.png") }),
+  iris: (base, head) => diff(base, head, { output: join(scratch, "mask.png") }),
   "iris, subpixel": (base, head) =>
     diff(base, head, {
       output: join(scratch, "mask.png"),
