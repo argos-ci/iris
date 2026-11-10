@@ -126,8 +126,9 @@ impl Mask {
       };
       bits.resize(bits.len() + stride, 0);
       let packed = &mut bits[rows * stride..];
-      for (x, pixel) in row.data().chunks_exact(4).enumerate() {
-        if is_marked([pixel[0], pixel[1], pixel[2], pixel[3]]) {
+      let (pixels, _) = row.data().as_chunks::<4>();
+      for (x, &pixel) in pixels.iter().enumerate() {
+        if is_marked(pixel) {
           packed[x / 8] |= 0x80 >> (x % 8);
           extent.include(x, rows);
         }

@@ -154,8 +154,9 @@ fn decode_png(bytes: &[u8]) -> Result<Image> {
     png::ColorType::GrayscaleAlpha => {
       let mut samples = vec![0u8; count * 2];
       reader.next_frame(&mut samples).map_err(png_error)?;
-      for (pixel, sample) in pixels.iter_mut().zip(samples.chunks_exact(2)) {
-        *pixel = u32::from_ne_bytes([sample[0], sample[0], sample[0], sample[1]]);
+      let (samples, _) = samples.as_chunks::<2>();
+      for (pixel, &[grey, alpha]) in pixels.iter_mut().zip(samples) {
+        *pixel = u32::from_ne_bytes([grey, grey, grey, alpha]);
       }
     }
     other => {
@@ -213,6 +214,25 @@ mod tests {
     assert_eq!((padded.width(), padded.height()), (3, 2));
     assert_eq!(&padded.pixels()[..2], image.pixels());
     assert!(padded.pixels()[2..].iter().all(|&pixel| pixel == 0));
+  }
+
+  #[test]
+  fn decodes_greyscale_pngs_as_rgba() {
+    let encode = |color: png::ColorType, samples: &[u8]| {
+      let mut output = Vec::new();
+      let mut encoder = png::Encoder::new(&mut output, 2, 1);
+      encoder.set_color(color);
+      encoder.set_depth(png::BitDepth::Eight);
+      let mut writer = encoder.write_header().unwrap();
+      writer.write_image_data(samples).unwrap();
+      writer.finish().unwrap();
+      output
+    };
+    let grey = Image::decode(&encode(png::ColorType::Grayscale, &[10, 200])).unwrap();
+    assert_eq!(grey.as_rgba8(), &[10, 10, 10, 255, 200, 200, 200, 255]);
+    let translucent =
+      Image::decode(&encode(png::ColorType::GrayscaleAlpha, &[10, 0, 200, 128])).unwrap();
+    assert_eq!(translucent.as_rgba8(), &[10, 10, 10, 0, 200, 200, 200, 128]);
   }
 
   #[test]
