@@ -1,0 +1,105 @@
+name: Publish
+
+# Publishes what CI built and tested, once CI succeeds on a commit pushed to
+# main whose first line is the version in package.json: `1.2.3` goes out under
+# `latest`, `1.2.3-beta.0` under `next`.
+#
+# npm trusts this workflow file by name (trusted publishing, no token), so the
+# publish has to run here, in a workflow of its own, rather than in CI.
+"on":
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - main
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  publish:
+    name: Publish
+    # Only a commit pushed to main: a pull request's branch can be named after
+    # main by anyone with a fork.
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      # The binaries are artifacts of the CI run.
+      actions: read
+      contents: read
+      # npm trusted publishing, and provenance.
+      id-token: write
+    env:
+      DEBUG: napi:*
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - name: Read the release
+        id: release
+        env:
+          MESSAGE: ${{ github.event.workflow_run.head_commit.message }}
+        run: |
+          FIRST_LINE="$(printf '%s' "$MESSAGE" | head -n 1 | tr -d '\r')"
+          VERSION="$(node -p 'require("./package.json").version')"
+
+          if printf '%s' "$FIRST_LINE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+          then
+            TAG=latest
+          elif printf '%s' "$FIRST_LINE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-'
+          then
+            TAG=next
+          else
+            echo "Not a release: $FIRST_LINE"
+            exit 0
+          fi
+
+          if [ "$FIRST_LINE" != "$VERSION" ]
+          then
+            echo "::error::The commit releases $FIRST_LINE, but package.json is at $VERSION"
+            exit 1
+          fi
+
+          echo "Releasing $VERSION under the $TAG tag"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+      - name: Setup node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: "https://registry.npmjs.org"
+      # Trusted publishing needs npm 11.5.1 or later.
+      - name: Update npm
+        run: npm install -g npm@11
+      - name: Install dependencies
+        run: pnpm install
+      - name: Create npm dirs
+        run: pnpm napi create-npm-dirs
+      # Every run gets this far, so a broken handoff from CI shows up before a
+      # release depends on it.
+      - name: Download the binaries CI built
+        uses: actions/download-artifact@v7
+        with:
+          pattern: bindings-*
+          path: artifacts
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Move artifacts
+        run: pnpm artifacts
+      - name: List packages
+        run: ls -R ./npm
+        shell: bash
+      # Publishes the five platform packages first (prepublishOnly), then the
+      # main one.
+      - name: Publish
+        if: steps.release.outputs.tag
+        run: npm publish --provenance --access public --tag "$TAG"
+        env:
+          TAG: ${{ steps.release.outputs.tag }}

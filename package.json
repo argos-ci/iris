@@ -45,7 +45,7 @@
     "bench": "node scripts/bench.mjs",
     "format": "cargo fmt --all && prettier . -w",
     "lint": "cargo clippy --workspace --all-targets -- -D warnings",
-    "prepublishOnly": "napi prepublish -t npm",
+    "prepublishOnly": "napi prepublish -t npm --no-gh-release",
     "test": "pnpm test:rust && pnpm test:node",
     "test:node": "vitest run",
     "test:rust": "ODIFF_BIN=$(node scripts/odiff-path.mjs) REQUIRE_ODIFF=1 cargo test -p iris",
