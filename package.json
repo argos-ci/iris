@@ -1,6 +1,6 @@
 {
   "name": "@argos-ci/iris",
-  "version": "0.1.0-beta.0",
+  "version": "0.1.0-beta.1",
   "description": "Single-pass screenshot comparison for Node.js: multi-threshold pixel diff with anti-aliasing detection, diff fingerprinting and layout-shift detection.",
   "main": "index.js",
   "types": "index.d.ts",
