@@ -10,8 +10,8 @@
 export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-wasip1'
 
 /**
- * Compare two images, given as file paths or as encoded buffers (PNG or
- * JPEG), in one pass: score, mask, fingerprint and layout shifts.
+ * Compare two images, given as file paths or as encoded buffers (PNG, JPEG
+ * or WebP), in one pass: score, mask, fingerprint and layout shifts.
  */
 export declare function diff(base: string | Buffer, head: string | Buffer, options?: DiffOptions | undefined | null): Promise<DiffResult>
 

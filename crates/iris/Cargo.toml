@@ -8,11 +8,12 @@ repository = "https://github.com/argos-ci/iris"
 keywords = ["image", "diff", "visual-regression", "screenshot", "fingerprint"]
 categories = ["multimedia::images"]
 
-[features]
-default = ["jpeg"]
-jpeg = ["dep:zune-jpeg"]
-
 [dependencies]
 bytemuck = "1"
+# Decoded with the libraries odiff 4.5.0 links, called the way it calls them:
+# a JPEG decoder of our own would round differently and move scores,
+# verdicts and fingerprints. Both are built from vendored sources, never a
+# system copy, so every platform decodes alike.
+libwebp-sys = { version = "0.14", default-features = false, features = ["std"] }
 png = "0.18"
-zune-jpeg = { version = "0.5", optional = true }
+turbojpeg-sys = { version = "1.2", default-features = false, features = ["cmake", "require-simd"] }

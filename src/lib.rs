@@ -6,8 +6,8 @@ use iris::{
   compare_buffers, compare_files, fingerprint_png, Antialiasing, Comparison, Mask, Options, Rect,
   Tier,
 };
-use napi::bindgen_prelude::{AsyncTask, Buffer, Either};
-use napi::{Env, Task};
+use napi::bindgen_prelude::{Buffer, Either, Object, ToNapiValue};
+use napi::Env;
 use napi_derive::napi;
 use sha2::{Digest, Sha256};
 
@@ -326,49 +326,60 @@ impl Input {
   }
 }
 
-pub struct DiffTask {
-  base: Input,
-  head: Input,
-  options: Option<JsDiffOptions>,
+/// Run `work` on a thread of its own and settle a promise with its result.
+///
+/// Not an `AsyncTask`: those run on libuv's thread pool, which has four
+/// threads by default and also serves the process's file system calls, DNS
+/// lookups, zlib and crypto. A comparison holds its thread from the first
+/// byte decoded to the last one written, and two of them would leave the
+/// rest of a server queueing for the other two.
+fn spawn<'env, T, J>(
+  env: &'env Env,
+  work: impl FnOnce() -> napi::Result<T> + Send + 'static,
+  into_js: fn(T) -> J,
+) -> napi::Result<Object<'env>>
+where
+  T: Send + 'static,
+  J: ToNapiValue + 'static,
+{
+  let (deferred, promise) =
+    env.create_deferred::<J, Box<dyn FnOnce(Env) -> napi::Result<J> + Send>>()?;
+  std::thread::Builder::new()
+    .name("iris".into())
+    .spawn(move || match guarded(work) {
+      Ok(value) => deferred.resolve(Box::new(move |_| Ok(into_js(value)))),
+      Err(error) => deferred.reject(error),
+    })
+    .map_err(|error| napi::Error::from_reason(format!("cannot start a thread: {error}")))?;
+  Ok(promise)
 }
 
-impl Task for DiffTask {
-  type Output = Outcome;
-  type JsValue = JsDiffResult;
+fn run_diff(base: Input, head: Input, options: Option<JsDiffOptions>) -> napi::Result<Outcome> {
+  let (options, output) = build_options(options)?;
+  let comparison = match (&base, &head) {
+    (Input::Path(base), Input::Path(head)) => compare_files(base, head, &options),
+    (base, head) => compare_buffers(&base.read()?, &head.read()?, &options),
+  }
+  .map_err(to_napi)?;
 
-  fn compute(&mut self) -> napi::Result<Self::Output> {
-    let (options, output) = build_options(self.options.take())?;
-    guarded(|| {
-      let comparison = match (&self.base, &self.head) {
-        (Input::Path(base), Input::Path(head)) => compare_files(base, head, &options),
-        (base, head) => compare_buffers(&base.read()?, &head.read()?, &options),
-      }
-      .map_err(to_napi)?;
-
-      let png = comparison
-        .mask
-        .as_ref()
-        .map(Mask::to_png)
-        .transpose()
-        .map_err(to_napi)?;
-      let sha256 = png.as_ref().map(|png| hex(&Sha256::digest(png)));
-      if let (Some(png), Some(path)) = (&png, &output) {
-        std::fs::write(path, png)
-          .map_err(|error| napi::Error::from_reason(format!("{path}: {error}")))?;
-      }
-
-      Ok(Outcome {
-        comparison,
-        png,
-        sha256,
-        output,
-      })
-    })
+  let png = comparison
+    .mask
+    .as_ref()
+    .map(Mask::to_png)
+    .transpose()
+    .map_err(to_napi)?;
+  let sha256 = png.as_ref().map(|png| hex(&Sha256::digest(png)));
+  if let (Some(png), Some(path)) = (&png, &output) {
+    std::fs::write(path, png)
+      .map_err(|error| napi::Error::from_reason(format!("{path}: {error}")))?;
   }
 
-  fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-    Ok(into_js(output))
-  }
+  Ok(Outcome {
+    comparison,
+    png,
+    sha256,
+    output,
+  })
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -381,42 +392,31 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
-/// Compare two images, given as file paths or as encoded buffers (PNG or
-/// JPEG), in one pass: score, mask, fingerprint and layout shifts.
+/// Compare two images, given as file paths or as encoded buffers (PNG, JPEG
+/// or WebP), in one pass: score, mask, fingerprint and layout shifts.
 #[napi(ts_return_type = "Promise<DiffResult>")]
-pub fn diff(
+pub fn diff<'env>(
+  env: &'env Env,
   base: Either<String, Buffer>,
   head: Either<String, Buffer>,
   options: Option<JsDiffOptions>,
-) -> AsyncTask<DiffTask> {
-  AsyncTask::new(DiffTask {
-    base: base.into(),
-    head: head.into(),
-    options,
-  })
-}
-
-pub struct FingerprintTask {
-  input: Input,
-}
-
-impl Task for FingerprintTask {
-  type Output = String;
-  type JsValue = String;
-
-  fn compute(&mut self) -> napi::Result<Self::Output> {
-    guarded(|| fingerprint_png(&self.input.read()?).map_err(to_napi))
-  }
-
-  fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-    Ok(output)
-  }
+) -> napi::Result<Object<'env>> {
+  let (base, head) = (Input::from(base), Input::from(head));
+  spawn(env, move || run_diff(base, head, options), into_js)
 }
 
 /// Fingerprint of a diff mask stored as a PNG: one written by `diff`, or a
 /// legacy mask with opaque red pixels on a transparent background. Returns
 /// the same value as `@argos-ci/mask-fingerprint`.
 #[napi(ts_return_type = "Promise<string>")]
-pub fn fingerprint_diff(png: Either<String, Buffer>) -> AsyncTask<FingerprintTask> {
-  AsyncTask::new(FingerprintTask { input: png.into() })
+pub fn fingerprint_diff<'env>(
+  env: &'env Env,
+  png: Either<String, Buffer>,
+) -> napi::Result<Object<'env>> {
+  let input = Input::from(png);
+  spawn(
+    env,
+    move || fingerprint_png(&input.read()?).map_err(to_napi),
+    |fingerprint| fingerprint,
+  )
 }

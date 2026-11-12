@@ -1,11 +1,12 @@
 //! Screenshot comparison in a single pass.
 //!
-//! Two images go in; out come a score, the mask of the pixels that differ, a
-//! fingerprint that is stable across diffs that look alike, and a report of
-//! the content that moved rather than changed. Every sensitivity tier is
-//! evaluated in the same scan of the pixels, anti-aliasing is detected once,
-//! and the fingerprint is computed from the mask in memory — nothing is
-//! decoded twice and no intermediate image is written.
+//! Two images go in — PNG, JPEG or WebP; out come a score, the mask of the
+//! pixels that differ, a fingerprint that is stable across diffs that look
+//! alike, and a report of the content that moved rather than changed. Every
+//! sensitivity tier is evaluated in the same scan of the pixels,
+//! anti-aliasing is detected once, and the fingerprint is computed from the
+//! mask in memory — nothing is decoded twice and no intermediate image is
+//! written.
 //!
 //! ```no_run
 //! use iris::{compare_files, Options};
@@ -35,7 +36,7 @@ use std::path::Path;
 pub use compare::{compare, Comparison, TierResult};
 pub use error::{Error, Result};
 pub use fingerprint::EMPTY_FINGERPRINT;
-pub use image::Image;
+pub use image::{Image, JpegDct};
 pub use mask::{Mask, Rect};
 pub use options::{Antialiasing, Options, Tier, MAX_TIERS};
 pub use shift::{ShiftReport, ShiftSegment};
@@ -58,7 +59,11 @@ pub fn compare_buffers(base: &[u8], head: &[u8], options: &Options) -> Result<Co
   if options.max_pixels.is_some() {
     compare::check_canvas(options, Image::dimensions(base)?, Image::dimensions(head)?)?;
   }
-  let (base, head) = join(|| Image::decode(base), || Image::decode(head));
+  let dct = options.jpeg_dct();
+  let (base, head) = join(
+    || Image::decode_with(base, dct),
+    || Image::decode_with(head, dct),
+  );
   compare(&base?, &head?, options)
 }
 
@@ -76,7 +81,11 @@ pub fn compare_files(
       Image::file_dimensions(head)?,
     )?;
   }
-  let (base, head) = join(|| Image::open(base), || Image::open(head));
+  let dct = options.jpeg_dct();
+  let (base, head) = join(
+    || Image::open_with(base, dct),
+    || Image::open_with(head, dct),
+  );
   compare(&base?, &head?, options)
 }
 

@@ -1,4 +1,5 @@
 use crate::error::{Error, Result};
+use crate::image::JpegDct;
 
 /// Most tiers a comparison can evaluate at once.
 pub const MAX_TIERS: usize = 8;
@@ -114,6 +115,18 @@ impl Options {
       min_shift_rows: 4,
       max_pixels: None,
       threads: 0,
+    }
+  }
+
+  /// How JPEG inputs are decoded: the way odiff did, with the fast IDCT
+  /// unless every tier's threshold is 0. odiff decided per run, and each of
+  /// its runs was one tier; the tiers of [`Options::sensitivity`] are all 0
+  /// or none is.
+  pub fn jpeg_dct(&self) -> JpegDct {
+    if self.tiers.iter().all(|tier| tier.threshold == 0.0) {
+      JpegDct::Accurate
+    } else {
+      JpegDct::Fast
     }
   }
 

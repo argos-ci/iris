@@ -38,6 +38,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      # libjpeg-turbo's x86 SIMD code is assembled by NASM. odiff's build has it,
+      # and `require-simd` fails the build rather than fall back to plain C.
+      - name: Install NASM
+        uses: ilammy/setup-nasm@v1
       - name: Install dependencies
         run: pnpm install
       - name: Cargo fmt
@@ -61,6 +65,10 @@ jobs:
           cache: pnpm
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      # libjpeg-turbo's x86 SIMD code is assembled by NASM. odiff's build has it,
+      # and `require-simd` fails the build rather than fall back to plain C.
+      - name: Install NASM
+        uses: ilammy/setup-nasm@v1
       - name: Install dependencies
         run: pnpm install
       # Runs odiff itself, from the `odiff-bin` package, and holds every mask
@@ -104,6 +112,10 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.settings.target }}
+      # libjpeg-turbo's x86 SIMD code is assembled by NASM. odiff's build has it,
+      # and `require-simd` fails the build rather than fall back to plain C.
+      - name: Install NASM
+        uses: ilammy/setup-nasm@v1
       - name: Cache cargo
         uses: actions/cache@v5
         with:

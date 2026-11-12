@@ -7,6 +7,18 @@ use crate::error::{Error, Result};
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
 const JPEG_SIGNATURE: [u8; 3] = [0xff, 0xd8, 0xff];
 
+/// The inverse DCT a JPEG is decoded with. The two differ in the last bit of
+/// many pixels, which is enough to move a pixel across a threshold.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum JpegDct {
+  /// libjpeg-turbo's fast integer IDCT, what odiff decoded with unless the
+  /// threshold was 0.
+  #[default]
+  Fast,
+  /// The accurate integer IDCT, what odiff decoded with at threshold 0.
+  Accurate,
+}
+
 /// A decoded image, 8-bit RGBA, not premultiplied.
 ///
 /// Each pixel is one `u32` whose bytes in memory are `[r, g, b, a]`, so two
@@ -54,17 +66,28 @@ impl Image {
     Self::new(width, height, pixels)
   }
 
-  /// Decode a PNG or a JPEG, told apart by their signature.
+  /// Decode a PNG, a JPEG or a WebP, told apart by their signature.
   pub fn decode(bytes: &[u8]) -> Result<Self> {
+    Self::decode_with(bytes, JpegDct::default())
+  }
+
+  /// [`Image::decode`], choosing how a JPEG is decoded.
+  pub fn decode_with(bytes: &[u8], dct: JpegDct) -> Result<Self> {
     match Format::of(bytes)? {
       Format::Png => decode_png(Cursor::new(bytes)),
-      Format::Jpeg => decode_jpeg(bytes),
+      Format::Jpeg => decode_jpeg(bytes, dct),
+      Format::Webp => decode_webp(bytes),
     }
   }
 
   /// Read and decode a file. A PNG is decoded as it is read, without holding
   /// the file in memory.
   pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+    Self::open_with(path, JpegDct::default())
+  }
+
+  /// [`Image::open`], choosing how a JPEG is decoded.
+  pub fn open_with(path: impl AsRef<Path>, dct: JpegDct) -> Result<Self> {
     let path = path.as_ref();
     let io_error = |source| Error::Io {
       path: path.to_path_buf(),
@@ -73,10 +96,13 @@ impl Image {
     let mut reader = BufReader::new(File::open(path).map_err(io_error)?);
     match Format::of(reader.fill_buf().map_err(io_error)?)? {
       Format::Png => decode_png(reader),
-      Format::Jpeg => {
+      format => {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).map_err(io_error)?;
-        decode_jpeg(&bytes)
+        match format {
+          Format::Jpeg => decode_jpeg(&bytes, dct),
+          _ => decode_webp(&bytes),
+        }
       }
     }
   }
@@ -86,6 +112,7 @@ impl Image {
     match Format::of(bytes)? {
       Format::Png => png_dimensions(Cursor::new(bytes)),
       Format::Jpeg => jpeg_dimensions(bytes),
+      Format::Webp => webp_dimensions(bytes),
     }
   }
 
@@ -99,11 +126,15 @@ impl Image {
     let mut reader = BufReader::new(File::open(path).map_err(io_error)?);
     match Format::of(reader.fill_buf().map_err(io_error)?)? {
       Format::Png => png_dimensions(reader),
-      Format::Jpeg => {
-        // A JPEG header can sit after any number of metadata segments.
+      format => {
+        // A JPEG header can sit after any number of metadata segments, and
+        // libwebp wants the whole file.
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).map_err(io_error)?;
-        jpeg_dimensions(&bytes)
+        match format {
+          Format::Jpeg => jpeg_dimensions(&bytes),
+          _ => webp_dimensions(&bytes),
+        }
       }
     }
   }
@@ -130,6 +161,7 @@ impl Image {
 enum Format {
   Png,
   Jpeg,
+  Webp,
 }
 
 impl Format {
@@ -138,6 +170,8 @@ impl Format {
       Ok(Format::Png)
     } else if bytes.starts_with(&JPEG_SIGNATURE) {
       Ok(Format::Jpeg)
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+      Ok(Format::Webp)
     } else {
       Err(Error::UnsupportedFormat)
     }
@@ -210,52 +244,137 @@ fn decode_png(reader: impl BufRead + Seek) -> Result<Image> {
   Image::new(width, height, pixels)
 }
 
-#[cfg(feature = "jpeg")]
-fn jpeg_error(error: zune_jpeg::errors::DecodeErrors) -> Error {
-  Error::Decode(error.to_string())
+/// A TurboJPEG decompressor, destroyed when dropped.
+struct Turbo(turbojpeg_sys::tjhandle);
+
+impl Turbo {
+  fn new() -> Result<Self> {
+    // SAFETY: no arguments; a null handle is the failure case, checked here.
+    let handle = unsafe { turbojpeg_sys::tjInitDecompress() };
+    if handle.is_null() {
+      return Err(Error::Decode("cannot start the JPEG decoder".into()));
+    }
+    Ok(Self(handle))
+  }
+
+  fn error(&self) -> Error {
+    // SAFETY: the handle is live; TurboJPEG returns a static or
+    // handle-owned string, copied out before the handle can go.
+    let message = unsafe { std::ffi::CStr::from_ptr(turbojpeg_sys::tjGetErrorStr2(self.0)) };
+    Error::Decode(message.to_string_lossy().into_owned())
+  }
+
+  fn length(bytes: &[u8]) -> Result<std::ffi::c_ulong> {
+    std::ffi::c_ulong::try_from(bytes.len())
+      .map_err(|_| Error::Decode("JPEG data does not fit the decoder".into()))
+  }
+
+  fn dimensions(&self, bytes: &[u8]) -> Result<(u32, u32)> {
+    let (mut width, mut height) = (0, 0);
+    // SAFETY: `bytes` outlives the call and its length is passed with it;
+    // the outputs point at live locals. The same call odiff makes.
+    let status = unsafe {
+      turbojpeg_sys::tjDecompressHeader(
+        self.0,
+        bytes.as_ptr().cast_mut(),
+        Self::length(bytes)?,
+        &mut width,
+        &mut height,
+      )
+    };
+    if status != 0 || width <= 0 || height <= 0 {
+      return Err(self.error());
+    }
+    Ok((width as u32, height as u32))
+  }
+
+  /// Decompress into RGBA, with odiff's arguments: the header's size, the
+  /// default pitch, and the DCT flag alone.
+  fn decompress(
+    &self,
+    bytes: &[u8],
+    pixels: &mut [u32],
+    (width, height): (u32, u32),
+    dct: JpegDct,
+  ) -> Result<()> {
+    let flags = match dct {
+      JpegDct::Fast => turbojpeg_sys::TJFLAG_FASTDCT,
+      JpegDct::Accurate => turbojpeg_sys::TJFLAG_ACCURATEDCT,
+    };
+    debug_assert_eq!(pixels.len(), width as usize * height as usize);
+    // SAFETY: `pixels` holds width * height RGBA pixels, which is what
+    // TJPF_RGBA with a 0 pitch writes for the dimensions read from this
+    // very header.
+    let status = unsafe {
+      turbojpeg_sys::tjDecompress2(
+        self.0,
+        bytes.as_ptr(),
+        Self::length(bytes)?,
+        pixels.as_mut_ptr().cast(),
+        width as std::ffi::c_int,
+        0,
+        height as std::ffi::c_int,
+        turbojpeg_sys::TJPF_TJPF_RGBA,
+        flags as std::ffi::c_int,
+      )
+    };
+    // A warning is a failure too, as it was for odiff.
+    if status != 0 {
+      return Err(self.error());
+    }
+    Ok(())
+  }
 }
 
-#[cfg(feature = "jpeg")]
-fn jpeg_decoder(
-  bytes: &[u8],
-) -> zune_jpeg::JpegDecoder<zune_jpeg::zune_core::bytestream::ZCursor<&[u8]>> {
-  use zune_jpeg::zune_core::bytestream::ZCursor;
-  use zune_jpeg::zune_core::colorspace::ColorSpace;
-  use zune_jpeg::zune_core::options::DecoderOptions;
-
-  let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
-  zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), options)
+impl Drop for Turbo {
+  fn drop(&mut self) {
+    // SAFETY: the handle came from tjInitDecompress and is dropped once.
+    unsafe { turbojpeg_sys::tjDestroy(self.0) };
+  }
 }
 
-#[cfg(feature = "jpeg")]
 fn jpeg_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
-  let mut decoder = jpeg_decoder(bytes);
-  decoder.decode_headers().map_err(jpeg_error)?;
-  let (width, height) = decoder
-    .dimensions()
-    .ok_or_else(|| Error::Decode("missing JPEG header".into()))?;
-  Ok((width as u32, height as u32))
+  Turbo::new()?.dimensions(bytes)
 }
 
-#[cfg(feature = "jpeg")]
-fn decode_jpeg(bytes: &[u8]) -> Result<Image> {
-  let (width, height) = jpeg_dimensions(bytes)?;
+fn decode_jpeg(bytes: &[u8], dct: JpegDct) -> Result<Image> {
+  let decoder = Turbo::new()?;
+  let (width, height) = decoder.dimensions(bytes)?;
   let mut pixels = vec![0u32; pixel_count(width, height)?];
-  // Straight into the pixels: `decode` would return a byte vector to copy.
-  jpeg_decoder(bytes)
-    .decode_into(bytemuck::cast_slice_mut(&mut pixels))
-    .map_err(jpeg_error)?;
+  decoder.decompress(bytes, &mut pixels, (width, height), dct)?;
   Image::new(width, height, pixels)
 }
 
-#[cfg(not(feature = "jpeg"))]
-fn jpeg_dimensions(_bytes: &[u8]) -> Result<(u32, u32)> {
-  Err(Error::UnsupportedFormat)
+fn webp_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+  let (mut width, mut height) = (0, 0);
+  // SAFETY: `bytes` outlives the call and its length is passed with it.
+  let ok =
+    unsafe { libwebp_sys::WebPGetInfo(bytes.as_ptr(), bytes.len(), &mut width, &mut height) };
+  if ok == 0 || width <= 0 || height <= 0 {
+    return Err(Error::Decode("invalid WebP header".into()));
+  }
+  Ok((width as u32, height as u32))
 }
 
-#[cfg(not(feature = "jpeg"))]
-fn decode_jpeg(_bytes: &[u8]) -> Result<Image> {
-  Err(Error::UnsupportedFormat)
+fn decode_webp(bytes: &[u8]) -> Result<Image> {
+  let (width, height) = webp_dimensions(bytes)?;
+  let mut pixels = vec![0u32; pixel_count(width, height)?];
+  let output: &mut [u8] = bytemuck::cast_slice_mut(&mut pixels);
+  // SAFETY: `output` holds width * height RGBA pixels at a stride of
+  // width * 4, the size and stride passed with it. The same call odiff makes.
+  let written = unsafe {
+    libwebp_sys::WebPDecodeRGBAInto(
+      bytes.as_ptr(),
+      bytes.len(),
+      output.as_mut_ptr(),
+      output.len(),
+      (width * 4) as std::ffi::c_int,
+    )
+  };
+  if written.is_null() {
+    return Err(Error::Decode("invalid WebP data".into()));
+  }
+  Image::new(width, height, pixels)
 }
 
 #[cfg(test)]

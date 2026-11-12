@@ -13,7 +13,7 @@ mod support;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use iris::{compare, Antialiasing, Image, Mask, Options, Tier};
+use iris::{compare, Antialiasing, Image, JpegDct, Mask, Options, Tier};
 use support::{encode_rgba, fixtures, image_from_fn, Random};
 
 fn odiff_binary() -> Option<PathBuf> {
@@ -370,4 +370,88 @@ fn matches_odiff_on_generated_images() {
       &THRESHOLDS,
     );
   }
+}
+
+/// JPEG and WebP, decoded the way odiff decodes them: through libjpeg-turbo's
+/// TurboJPEG API (fast IDCT, accurate at threshold 0) and libwebp. Lossy
+/// formats are where a decoder of our own would differ in the last bit of
+/// many pixels, and so in scores, verdicts and fingerprints.
+#[test]
+fn matches_odiff_on_jpeg_and_webp() {
+  let Some(binary) = odiff_binary() else { return };
+  let scratch = Scratch::new("formats");
+  let diff_path = scratch.0.join("diff.png");
+
+  let root = fixtures().join("formats");
+  let mut cases = Vec::new();
+  for pair in std::fs::read_dir(&root).unwrap() {
+    let pair = pair.unwrap().path();
+    for file in std::fs::read_dir(&pair).unwrap() {
+      let base = file.unwrap().path();
+      let name = base.file_name().unwrap().to_string_lossy().into_owned();
+      if let Some(variant) = name
+        .split_once("-base.")
+        .map(|(variant, _)| variant.to_string())
+      {
+        let head = pair.join(name.replace("-base.", "-compare."));
+        cases.push((
+          format!("{}/{variant}", pair.file_name().unwrap().to_string_lossy()),
+          base,
+          head,
+        ));
+      }
+    }
+  }
+  cases.sort();
+  assert!(
+    cases.len() >= 36,
+    "only {} format fixtures found",
+    cases.len()
+  );
+
+  for (name, base_path, head_path) in &cases {
+    for &threshold in &THRESHOLDS {
+      let dct = if threshold == 0.0 {
+        JpegDct::Accurate
+      } else {
+        JpegDct::Fast
+      };
+      let base = Image::open_with(base_path, dct).unwrap();
+      let head = Image::open_with(head_path, dct).unwrap();
+      for antialiasing in [true, false] {
+        let context = format!("{name}, threshold {threshold}, antialiasing {antialiasing}");
+        let (expected_count, expected_mask) = odiff(
+          &binary,
+          base_path,
+          head_path,
+          &diff_path,
+          threshold,
+          antialiasing,
+        );
+        let (count, mask) = ours(&base, &head, threshold, antialiasing);
+        assert_eq!(count, expected_count, "pixel count: {context}");
+        assert!(mask == expected_mask, "mask pixels: {context}");
+      }
+    }
+  }
+}
+
+/// The DCT odiff picks depends on the threshold, and it shows: decoding a
+/// JPEG with the other one moves pixels across the threshold.
+#[test]
+fn the_jpeg_dct_matters() {
+  let base_path = fixtures().join("formats/simple/jpeg-baseline-base.jpg");
+  let fast = Image::open_with(&base_path, JpegDct::Fast).unwrap();
+  let accurate = Image::open_with(&base_path, JpegDct::Accurate).unwrap();
+  assert_eq!(
+    (fast.width(), fast.height()),
+    (accurate.width(), accurate.height())
+  );
+  let differing = fast
+    .pixels()
+    .iter()
+    .zip(accurate.pixels())
+    .filter(|(a, b)| a != b)
+    .count();
+  assert!(differing > 1000, "{differing} pixels");
 }

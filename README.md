@@ -134,7 +134,8 @@ diff(base, head, options?): Promise<DiffResult>
 fingerprintDiff(png): Promise<string>
 ```
 
-`base`, `head` and `png` are file paths or buffers. PNG and JPEG are decoded.
+`base`, `head` and `png` are file paths or buffers. PNG, JPEG and WebP are
+decoded, told apart by their signature.
 
 | option         | default     |                                                                   |
 | -------------- | ----------- | ----------------------------------------------------------------- |
@@ -152,6 +153,10 @@ fingerprintDiff(png): Promise<string>
 The mask is a 1-bit PNG, opaque red on transparent, the size of the larger
 width and the larger height. `mask.sha256` is the hash of the file.
 
+Each call runs on a thread of its own, not on libuv's thread pool: the pool
+has four threads, and the rest of the process needs them for file system
+calls, DNS lookups and crypto while a comparison runs.
+
 ### `exactScore`
 
 Argos has always read its scores from the `odiff` command line, which prints a
@@ -168,9 +173,20 @@ they say, and changes that were silently dropped are reported.
 ## Compared to the pipeline it replaces
 
 Same verdict, same score and same fingerprint on every fixture at four
-sensitivities, checked against the real `odiff-bin`, `sharp` and
-`@argos-ci/mask-fingerprint` in [`__test__`](__test__/index.spec.ts). Three
-things differ on purpose:
+sensitivities, as PNG and re-encoded as baseline, 4:4:4, progressive and grey
+JPEG and lossy and lossless WebP, checked against the real `odiff-bin`, `sharp`
+and `@argos-ci/mask-fingerprint` in [`__test__`](__test__/index.spec.ts).
+
+Lossy formats are where that takes care. A JPEG decoder rounds its inverse
+DCT and colour conversion its own way, and a different one moves pixels
+across a threshold: with zune-jpeg, a progressive JPEG of the `tableAlpha`
+fixture scored 328,731 differing pixels where odiff found 60,823. So JPEG and
+WebP go through the libraries odiff 4.5.0 links — libjpeg-turbo through its
+TurboJPEG API, with the fast IDCT unless the threshold is 0, and libwebp —
+called the way odiff calls them, built from vendored sources with their SIMD
+code.
+
+Three things differ on purpose:
 
 - **An image smaller both ways is not rescaled.** `sharp`'s `fit: "contain"`
   scaled such an image up before padding it, so the same content at twice the
@@ -252,6 +268,8 @@ if let Some(mask) = &result.mask {
 
 ## Development
 
+Building needs CMake, and NASM on x86 for libjpeg-turbo's SIMD code.
+
 ```bash
 pnpm install
 pnpm build      # the native addon, release profile
@@ -260,8 +278,10 @@ pnpm bench
 ```
 
 `pnpm test:rust` points `ODIFF_BIN` at the binary `odiff-bin` ships and runs
-it on every fixture and on generated images, at six thresholds, with
-anti-aliasing on and off, comparing masks bit by bit. Parity is with odiff
+it on every fixture — PNG, JPEG and WebP — and on generated images, at six
+thresholds, with anti-aliasing on and off, comparing masks bit by bit. It also
+feeds the decoders 1,500 damaged files: a comparison runs inside the server
+process, so bad input has to be refused, never crash it. Parity is with odiff
 **4.5.0**, whose fixed-point coefficients are truncated; later versions round
 them and count a few more pixels near the threshold.
 

@@ -1,4 +1,6 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readdirSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -202,6 +204,27 @@ describe("diff", () => {
     expect(auto).toEqual(one);
   });
 
+  test("leaves libuv's thread pool to the rest of the process", async () => {
+    // One pool thread: a file system call queued behind a comparison running
+    // on the pool would wait for it to finish.
+    const { base, head } = pair("big-images");
+    const script = `
+      const { diff } = require(${JSON.stringify(join(import.meta.dirname, "../index.js"))});
+      const { stat } = require("node:fs/promises");
+      const order = [];
+      Promise.all([
+        diff(${JSON.stringify(base)}, ${JSON.stringify(head)}).then(() => order.push("diff")),
+        stat(${JSON.stringify(base)}).then(() => order.push("stat")),
+      ]).then(() => process.stdout.write(order.join(",")));
+    `;
+    const { stdout, status } = spawnSync(process.execPath, ["-e", script], {
+      env: { ...process.env, UV_THREADPOOL_SIZE: "1" },
+      encoding: "utf8",
+    });
+    expect(status).toBe(0);
+    expect(stdout).toBe("stat,diff");
+  });
+
   test("gives its memory back between calls", async () => {
     const { base, head } = pair("big-images");
     const run = () =>
@@ -384,6 +407,45 @@ describe("drop-in parity with the odiff + mask-fingerprint pipeline", () => {
     expect(result.score).toBe(legacy.score);
     expect(result.fingerprint ?? null).toBe(legacy.fingerprint);
   });
+
+  // The same pairs as JPEG and WebP, which iris decodes with the libraries
+  // odiff links, called the same way.
+  const formats = join(fixtures, "formats");
+  const formatCases = readdirSync(formats)
+    .sort()
+    .flatMap((pair) =>
+      readdirSync(join(formats, pair))
+        .filter((file) => file.includes("-base."))
+        .sort()
+        .flatMap((file) =>
+          [0, 0.25, 0.5, 1].map(
+            (threshold) =>
+              [
+                `${pair}/${file.split("-base.")[0]}`,
+                threshold,
+                join(formats, pair, file),
+                join(formats, pair, file.replace("-base.", "-compare.")),
+              ] as const,
+          ),
+        ),
+    );
+
+  test.each(formatCases)(
+    "%s at sensitivity %s",
+    async (_name, threshold, base, head) => {
+      const [legacy, result] = await Promise.all([
+        legacyDiff(
+          base,
+          head,
+          threshold,
+          await mkdtemp(join(scratch, "legacy-")),
+        ),
+        diff(base, head, { threshold }),
+      ]);
+      expect(result.score).toBe(legacy.score);
+      expect(result.fingerprint ?? null).toBe(legacy.fingerprint);
+    },
+  );
 
   test("compares an oversized pair on its full canvas", async () => {
     // 532x39062 against 2695x4986 is over the old 80 megapixel limit, where
