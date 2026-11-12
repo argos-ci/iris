@@ -93,9 +93,12 @@ jobs:
           - host: macos-latest
             target: aarch64-apple-darwin
             build: pnpm build --target aarch64-apple-darwin
-          - host: ubuntu-latest
+          # Built natively: the napi cross toolchain's GCC lacks NEON
+          # intrinsics libwebp uses. Ubuntu 22.04's glibc 2.35 keeps the
+          # binary loadable on Debian bookworm, which Node's images use.
+          - host: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-            build: pnpm build --target aarch64-unknown-linux-gnu --use-napi-cross
+            build: pnpm build --target aarch64-unknown-linux-gnu
     name: stable - ${{ matrix.settings.target }} - node@24
     runs-on: ${{ matrix.settings.host }}
     steps:
@@ -115,6 +118,7 @@ jobs:
       # libjpeg-turbo's x86 SIMD code is assembled by NASM. odiff's build has it,
       # and `require-simd` fails the build rather than fall back to plain C.
       - name: Install NASM
+        if: ${{ contains(matrix.settings.target, 'x86_64') }}
         uses: ilammy/setup-nasm@v1
       - name: Cache cargo
         uses: actions/cache@v5
