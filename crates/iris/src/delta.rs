@@ -65,6 +65,12 @@ fn yiq(pixel: u32) -> (i64, i64, i64) {
   )
 }
 
+/// Whether two pixels are at most `max_delta` apart.
+#[inline(always)]
+pub(crate) fn within(a: u32, b: u32, max_delta: i64) -> bool {
+  a == b || color_delta(a, b) <= max_delta
+}
+
 /// Distance between two pixels, scaled by 4096. Semi-transparent pixels are
 /// blended over white first.
 #[inline]

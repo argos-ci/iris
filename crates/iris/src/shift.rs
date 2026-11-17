@@ -37,12 +37,10 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
 
-use crate::antialias::is_antialiased;
-use crate::delta::color_delta;
+use crate::antialias::Noise;
+use crate::delta::within;
 use crate::mask::{Mask, Rect};
-use crate::options::Antialiasing;
-use crate::subpixel::is_subpixel_shift;
-use crate::view::{Row, View};
+use crate::view::{chunk_is_equal, Row, View, CHUNK};
 
 /// Columns without a difference narrower than this do not split a strip:
 /// the gap between two words is not the gap between two page columns.
@@ -101,10 +99,8 @@ pub(crate) struct Input<'a> {
   /// Largest colour delta the mask leaves out: pixels this close are the
   /// same content.
   pub max_delta: i64,
-  /// The detector that left anti-aliasing out of the mask, and what
-  /// "unchanged" means to the sub-pixel one.
-  pub antialiasing: Antialiasing,
-  pub same: i64,
+  /// The detector that left rendering noise out of the mask.
+  pub noise: Noise,
   pub min_rows: usize,
 }
 
@@ -194,9 +190,6 @@ fn nearest(positions: &[usize], target: usize) -> &[usize] {
   &positions[start..start + MAX_CANDIDATES]
 }
 
-/// Pixels compared at once when looking for the first that differs.
-const CHUNK: usize = 8;
-
 /// Whether every pixel of `now` is within `max_delta` of the one at its
 /// column in `before`, or else passes `otherwise`, given that column and
 /// its colour. Equal pixels are skipped a chunk at a time.
@@ -207,23 +200,21 @@ fn matches(
   max_delta: i64,
   mut otherwise: impl FnMut(usize, u32) -> bool,
 ) -> bool {
-  let mut pass = |x: usize, pixel: u32, other: u32| {
-    pixel == other || color_delta(other, pixel) <= max_delta || otherwise(x, pixel)
-  };
+  let mut pass =
+    |x: usize, pixel: u32, other: u32| within(other, pixel, max_delta) || otherwise(x, pixel);
   let shared = now.pixels.len().min(before.pixels.len());
-  let (now_pixels, before_pixels) = (&now.pixels[..shared], &before.pixels[..shared]);
-  let mut x = 0;
-  while x < shared {
-    let end = (x + CHUNK).min(shared);
-    if now_pixels[x..end] != before_pixels[x..end]
-      && !(x..end).all(|x| pass(x, now_pixels[x], before_pixels[x]))
+  let chunks = now.pixels[..shared]
+    .chunks_exact(CHUNK)
+    .zip(before.pixels[..shared].chunks_exact(CHUNK));
+  for (index, (now, before)) in chunks.enumerate() {
+    if !chunk_is_equal(now, before)
+      && !(0..CHUNK).all(|at| pass(index * CHUNK + at, now[at], before[at]))
     {
       return false;
     }
-    x = end;
   }
   let width = now.pixels.len() + now.zeros;
-  (shared..width).all(|x| pass(x, now.get(x), before.get(x)))
+  (shared - shared % CHUNK..width).all(|x| pass(x, now.get(x), before.get(x)))
 }
 
 /// The two images lined up for a move of `offset` rows down: row `y` of the
@@ -239,6 +230,31 @@ fn aligned<'a>(base: View<'a>, head: View<'a>, offset: isize) -> (View<'a>, View
   (base, head)
 }
 
+/// A distance content was seen to move by, and the head rows that saw it.
+struct Displacement {
+  offset: isize,
+  voters: Vec<usize>,
+}
+
+/// How many telling rows lie in any range of rows: the evidence a move
+/// needs to count there.
+struct Evidence(Vec<usize>);
+
+impl Evidence {
+  fn new(telling: &[bool]) -> Self {
+    let mut total = 0;
+    let before = telling.iter().map(|&telling| {
+      total += usize::from(telling);
+      total
+    });
+    Self(std::iter::once(0).chain(before).collect())
+  }
+
+  fn within(&self, start: usize, end: usize) -> usize {
+    self.0[end] - self.0[start]
+  }
+}
+
 /// The columns of a strip, from the row above its first difference to the
 /// row below its last.
 struct Strip<'i, 'a> {
@@ -246,12 +262,15 @@ struct Strip<'i, 'a> {
   x0: usize,
   x1: usize,
   top: usize,
-  rows: usize,
   base: Vec<Signature>,
   head: Vec<Signature>,
 }
 
 impl<'a> Strip<'_, 'a> {
+  fn rows(&self) -> usize {
+    self.head.len()
+  }
+
   fn base_row(&self, index: usize) -> Row<'a> {
     self.input.base.row(self.top + index, self.x0, self.x1)
   }
@@ -260,90 +279,115 @@ impl<'a> Strip<'_, 'a> {
     self.input.head.row(self.top + index, self.x0, self.x1)
   }
 
-  /// Whether every pixel of `a` is within the mask's threshold of the one
-  /// below it in `b`.
-  fn close(&self, a: Row, b: Row) -> bool {
-    matches(a, b, self.input.max_delta, |_, _| false)
-  }
-
-  /// Head rows that say where they are: not one colour, and not like the
-  /// rows on either side. A row of background between a card's two borders
-  /// looks like every other row of that card, so it fits wherever the card
-  /// is: it can follow a block that moved, never tell that one did.
-  fn telling(&self) -> Vec<bool> {
-    let (_, height) = self.input.head.image_size();
-    let row = |y: usize| self.input.head.row(y, self.x0, self.x1);
-    // Whether each row looks like the next, from the row above the strip,
-    // when there is one, to its last row.
-    let like: Vec<bool> = (self.top.saturating_sub(1)..self.top + self.rows)
-      .map(|y| y + 1 < height && self.close(row(y), row(y + 1)))
-      .collect();
-    let skipped = usize::from(self.top == 0);
-    (0..self.rows)
+  /// Head rows that stayed in place: the mask holds nothing of them. Rows
+  /// past the end of either image are padding, never in place.
+  fn in_place(&self) -> Vec<bool> {
+    (0..self.rows())
       .map(|index| {
-        let above = index + 1 > skipped && like[index - skipped];
-        let below = like[index + 1 - skipped];
-        let row = self.head[index];
-        !row.flat && !row.void && !above && !below
+        !self.head[index].void
+          && !self.base[index].void
+          && self
+            .input
+            .mask
+            .count_in_row(self.top + index, self.x0, self.x1)
+            == 0
       })
       .collect()
   }
 
-  /// Distances content was seen to move by: a telling head row that differs
-  /// in place and is equal to base rows elsewhere votes for the distances to
-  /// them, one vote shared between all the places it may have come from. The
-  /// distances with `min_rows` votes, most voted first, at most
-  /// `MAX_DISPLACEMENTS` of them, each with the rows that voted for it.
-  fn displacements(&self, telling: &[bool]) -> Vec<(isize, Vec<usize>)> {
+  /// Head rows that say where they are: not in place, not one colour, and
+  /// not like the rows on either side. A row of background between a
+  /// card's two borders looks like every other row of that card, so it fits
+  /// wherever the card is: it can follow a block that moved, never tell
+  /// that one did.
+  fn telling(&self, in_place: &[bool]) -> Vec<bool> {
+    let (_, height) = self.input.head.image_size();
+    let row = |y: usize| self.input.head.row(y, self.x0, self.x1);
+    (0..self.rows())
+      .map(|index| {
+        let signature = self.head[index];
+        if in_place[index] || signature.flat || signature.void {
+          return false;
+        }
+        let y = self.top + index;
+        // Rows that hash alike are alike; a collision only makes a row
+        // less telling.
+        let like = |other: usize| {
+          let hashed_alike = other
+            .checked_sub(self.top)
+            .and_then(|other| self.head.get(other))
+            .is_some_and(|other| other.hash == signature.hash);
+          other < height
+            && (hashed_alike || matches(row(y), row(other), self.input.max_delta, |_, _| false))
+        };
+        !y.checked_sub(1).is_some_and(like) && !like(y + 1)
+      })
+      .collect()
+  }
+
+  /// Distances content was seen to move by: a telling head row equal to
+  /// base rows elsewhere votes for the distances to them, one vote shared
+  /// between all the places it may have come from. The distances with
+  /// `min_rows` votes, most voted first, at most `MAX_DISPLACEMENTS` of them.
+  fn displacements(&self, telling: &[bool]) -> Vec<Displacement> {
     let mut positions: HashMap<u64, Vec<usize>> = HashMap::new();
     for (index, row) in self.base.iter().enumerate() {
       if !row.flat && !row.void {
         positions.entry(row.hash).or_default().push(index);
       }
     }
-    let mut votes: HashMap<isize, (f64, Vec<usize>)> = HashMap::new();
-    for (index, row) in self.head.iter().enumerate() {
-      let base = self.base[index];
-      if !telling[index] || !base.void && base.hash == row.hash {
-        continue;
+    let sources = |index: usize| -> &[usize] {
+      match positions.get(&self.head[index].hash) {
+        Some(found) if telling[index] => nearest(found, index),
+        _ => &[],
       }
-      let Some(sources) = positions.get(&row.hash) else {
-        continue;
-      };
-      let sources = nearest(sources, index);
-      let share = 1.0 / sources.len() as f64;
+    };
+    let offset = |index: usize, source: usize| index as isize - source as isize;
+
+    let mut votes: HashMap<isize, f64> = HashMap::new();
+    for index in 0..self.rows() {
+      let sources = sources(index);
       for &source in sources {
-        let (count, voters) = votes.entry(index as isize - source as isize).or_default();
-        *count += share;
-        voters.push(index);
+        *votes.entry(offset(index, source)).or_default() += 1.0 / sources.len() as f64;
       }
     }
-    let mut found: Vec<(isize, (f64, Vec<usize>))> = votes
+    let mut kept: Vec<(isize, f64)> = votes
       .into_iter()
-      .filter(|(_, (votes, _))| *votes >= self.input.min_rows as f64)
+      .filter(|&(_, votes)| votes >= self.input.min_rows as f64)
       .collect();
     // Between equal votes, the shorter move first, then the upward one: any
     // fixed order will do, as long as it is not the map's.
-    found.sort_by(|a, b| {
-      (b.1)
-        .0
-        .total_cmp(&(a.1).0)
-        .then(a.0.abs().cmp(&b.0.abs()))
-        .then(a.0.cmp(&b.0))
+    kept.sort_by(|a, b| {
+      b.1
+        .total_cmp(&a.1)
+        .then((a.0.abs(), a.0).cmp(&(b.0.abs(), b.0)))
     });
-    found.truncate(MAX_DISPLACEMENTS);
-    found
+    kept.truncate(MAX_DISPLACEMENTS);
+
+    let mut found: Vec<Displacement> = kept
       .into_iter()
-      .map(|(offset, (_, voters))| (offset, voters))
-      .collect()
+      .map(|(offset, _)| Displacement {
+        offset,
+        voters: Vec::new(),
+      })
+      .collect();
+    for index in 0..self.rows() {
+      for &source in sources(index) {
+        let offset = offset(index, source);
+        if let Some(found) = found.iter_mut().find(|found| found.offset == offset) {
+          found.voters.push(index);
+        }
+      }
+    }
+    found
   }
 
-  /// Which of `offsets` explain each head row, as a bitset: bit `s` when
-  /// the row is what became of the base row `offsets[s]` rows above it.
-  /// Staying in place is tried on every row; a move only around the rows
-  /// found at its distance exactly, from which it spreads to the rows above
-  /// and below for as long as it explains them. Each row is tried once per
-  /// move that reaches it, not once per move.
+  /// Which explanations fit each head row, as a bitset: bit 0 when the row
+  /// stayed in place, bit `s` when it is what became of the base row
+  /// `found[s - 1].offset` rows above it. A move is only tried around the
+  /// rows that voted for it, from which it spreads to the rows above and
+  /// below for as long as it explains them: each row is tried once per move
+  /// that reaches it, not once per move.
   ///
   /// Browsers lay content out at fractional positions, snap each piece to
   /// the pixel grid on its own and render it anew: a block that moves by
@@ -351,70 +395,55 @@ impl<'a> Strip<'_, 'a> {
   /// gradients dithered and its edges anti-aliased afresh. So a row is
   /// explained by a move when none of its pixels would be in the mask: each
   /// is within the mask's threshold of the pixel it moved from or of the one
-  /// just above or below that, or is anti-aliasing to the detector that made
-  /// the mask. Staying in place gets no such slack: a row that moved by one
+  /// just above or below that, or is noise to the detector that made the
+  /// mask. Staying in place gets no such slack: a row that moved by one
   /// pixel did not stay.
-  fn explain(&self, offsets: &[isize], seeds: &[&[usize]]) -> Vec<u32> {
+  fn explain(&self, in_place: &[bool], found: &[Displacement]) -> Vec<u32> {
     let input = self.input;
-    let views: Vec<(View, View)> = offsets
-      .iter()
-      .map(|&offset| aligned(input.base, input.head, offset))
-      .collect();
-    let explains = |index: usize, state: usize| -> bool {
-      let offset = offsets[state];
-      let Some(source) = index
-        .checked_add_signed(-offset)
-        .filter(|&source| source < self.rows)
-      else {
+    let rows = self.rows();
+    let base_row =
+      |source: usize| (source < rows && !self.base[source].void).then(|| self.base_row(source));
+    let explains = |index: usize, offset: isize| -> bool {
+      let (Some(source), false) = (index.checked_add_signed(-offset), self.head[index].void) else {
         return false;
       };
-      if self.head[index].void || self.base[source].void {
+      let Some(before) = base_row(source) else {
         return false;
-      }
-      let (now, before) = (self.head_row(index), self.base_row(source));
-      if now == before {
+      };
+      let now = self.head_row(index);
+      if self.head[index].hash == self.base[source].hash && now == before {
         return true;
       }
-      let around = |source: Option<usize>| {
-        source
-          .filter(|&source| offset != 0 && source < self.rows && !self.base[source].void)
-          .map(|source| self.base_row(source))
-      };
-      let (above, below) = (around(source.checked_sub(1)), around(Some(source + 1)));
-      let (base, head) = &views[state];
+      let (above, below) = (
+        source.checked_sub(1).and_then(base_row),
+        base_row(source + 1),
+      );
+      let (base, head) = aligned(input.base, input.head, offset);
       let y = self.top + index.min(source);
       matches(now, before, input.max_delta, |x, pixel| {
-        let close = |row: Row| {
-          let other = row.get(x);
-          other == pixel || color_delta(other, pixel) <= input.max_delta
-        };
-        above.is_some_and(close)
-          || below.is_some_and(close)
-          || match input.antialiasing {
-            Antialiasing::Off => false,
-            Antialiasing::Classic => is_antialiased(base, head, self.x0 + x, y),
-            Antialiasing::Subpixel => is_subpixel_shift(base, head, self.x0 + x, y, input.same),
-          }
+        let near = |row: Row| within(row.get(x), pixel, input.max_delta);
+        above.is_some_and(near)
+          || below.is_some_and(near)
+          || input.noise.at(&base, &head, self.x0 + x, y)
       })
     };
-    let mut explained: Vec<u32> = (0..self.rows)
-      .map(|index| u32::from(explains(index, 0)))
-      .collect();
-    for (state, seeds) in seeds.iter().enumerate().skip(1) {
+
+    let mut explained: Vec<u32> = in_place.iter().map(|&stayed| u32::from(stayed)).collect();
+    for (state, found) in (1..).zip(found) {
       let bit = 1 << state;
-      for &seed in seeds.iter() {
-        if explained[seed] & bit != 0 || !explains(seed, state) {
+      let fits = |index: usize| explains(index, found.offset);
+      for &seed in &found.voters {
+        if explained[seed] & bit != 0 || !fits(seed) {
           continue;
         }
         explained[seed] |= bit;
         let mut index = seed;
-        while index > 0 && explained[index - 1] & bit == 0 && explains(index - 1, state) {
+        while index > 0 && explained[index - 1] & bit == 0 && fits(index - 1) {
           index -= 1;
           explained[index] |= bit;
         }
         let mut index = seed;
-        while index + 1 < self.rows && explained[index + 1] & bit == 0 && explains(index + 1, state)
-        {
+        while index + 1 < rows && explained[index + 1] & bit == 0 && fits(index + 1) {
           index += 1;
           explained[index] |= bit;
         }
@@ -424,47 +453,66 @@ impl<'a> Strip<'_, 'a> {
   }
 }
 
+/// A run of rows one move explains, and the evidence it holds.
+struct Stretch {
+  evidence: usize,
+  state: usize,
+  start: usize,
+  end: usize,
+}
+
 /// Clear, in `explained`, every move where it has no evidence of its own.
 ///
 /// A move counts in a stretch of rows it explains when `min_rows` of them
-/// are anchors: telling rows that staying in place does not explain.
-/// Elsewhere it explains nothing, however many plain rows it happens to fit.
+/// are telling. Elsewhere it explains nothing, however many plain rows it
+/// happens to fit.
 ///
 /// And each base row went to one place: the stretches with the most
 /// evidence claim the rows they came from first. Rows of a stretch whose
 /// source is already claimed are a copy of what moved, not where it went —
 /// new content that looks like old — and what is left of the stretch needs
 /// evidence of its own.
-fn keep_evidenced(explained: &mut [u32], anchors: &[bool], offsets: &[isize], min_rows: usize) {
+fn keep_evidenced(explained: &mut [u32], evidence: &Evidence, offsets: &[isize], min_rows: usize) {
   let rows = explained.len();
-  let evidence =
-    |start: usize, end: usize| anchors[start..end].iter().filter(|&&anchor| anchor).count();
-  let mut stretches: Vec<(usize, usize, usize, usize)> = Vec::new();
+  let mut stretches: Vec<Stretch> = Vec::new();
   for state in 1..offsets.len() {
     let bit = 1 << state;
     let found: Vec<(usize, usize)> = runs(rows, |index| explained[index] & bit != 0).collect();
     for (start, end) in found {
-      stretches.push((evidence(start, end), state, start, end));
       explained[start..end]
         .iter_mut()
         .for_each(|bits| *bits &= !bit);
+      let evidence = evidence.within(start, end);
+      if evidence >= min_rows {
+        stretches.push(Stretch {
+          evidence,
+          state,
+          start,
+          end,
+        });
+      }
     }
   }
-  stretches.sort_by_key(|&(found, state, start, end)| {
-    (Reverse(found), Reverse(end - start), state, start)
+  stretches.sort_by_key(|stretch| {
+    (
+      Reverse(stretch.evidence),
+      Reverse(stretch.end - stretch.start),
+      stretch.state,
+      stretch.start,
+    )
   });
   let mut claimed = vec![false; rows];
-  for (found, state, start, end) in stretches {
-    if found < min_rows {
-      continue;
-    }
+  for Stretch {
+    state, start, end, ..
+  } in stretches
+  {
     let source = |index: usize| (index as isize - offsets[state]) as usize;
     let free: Vec<(usize, usize)> = runs(end - start, |at| !claimed[source(start + at)]).collect();
     for (from, to) in free
       .into_iter()
       .map(|(from, to)| (start + from, start + to))
     {
-      if evidence(from, to) >= min_rows {
+      if evidence.within(from, to) >= min_rows {
         explained[from..to]
           .iter_mut()
           .for_each(|bits| *bits |= 1 << state);
@@ -481,31 +529,38 @@ fn keep_evidenced(explained: &mut [u32], anchors: &[bool], offsets: &[isize], mi
 /// explanation costs `start`. Between equal costs, rows take the lowest
 /// explanations they can. Returns, per row, the explanation it got, `states`
 /// for none.
-fn assign(explained: &[u32], void: &[bool], states: usize, start: u32) -> Vec<usize> {
+fn assign(
+  explained: &[u32],
+  padding: impl Fn(usize) -> bool,
+  states: usize,
+  start: u32,
+) -> Vec<usize> {
   const NEVER: (u32, u32) = (u32::MAX / 4, u32::MAX / 4);
   let none = states;
-  // Above the strip, everything is in place.
-  let mut previous = vec![NEVER; states + 1];
-  previous[0] = (0, 0);
-  let mut from = vec![0u8; explained.len() * (states + 1)];
-  for (row, &bits) in explained.iter().enumerate() {
-    let (best, best_state) = previous
+  let cheapest = |costs: &[(u32, u32)]| {
+    costs
       .iter()
       .copied()
       .zip(0..)
       .min()
-      .expect("one state at least");
-    let mut current = vec![NEVER; states + 1];
+      .expect("one state at least")
+  };
+  // Above the strip, everything is in place.
+  let mut previous = vec![NEVER; states + 1];
+  previous[0] = (0, 0);
+  let mut current = previous.clone();
+  let mut from = vec![0u8; explained.len() * (states + 1)];
+  for (row, &bits) in explained.iter().enumerate() {
+    let (best, best_state) = cheapest(&previous);
+    current.fill(NEVER);
     for state in 0..=none {
-      let (cost, rank) = match state {
-        state if state == none => (u32::from(!void[row]), 0),
-        state if bits & 1 << state != 0 => (0, state as u32),
+      // What the row costs in that state, the rank that breaks ties, and
+      // what entering the state costs.
+      let (cost, rank, entering) = match state {
+        0 if bits & 1 != 0 => (0, 0, 1),
+        state if state == none => (u32::from(!padding(row)), 0, 0),
+        state if state != 0 && bits & 1 << state != 0 => (0, state as u32, start),
         _ => continue,
-      };
-      let entering = match state {
-        0 => 1,
-        state if state == none => 0,
-        _ => start,
       };
       let switched = (best.0 + entering, best.1);
       let (total, before) = if previous[state] <= switched {
@@ -516,14 +571,9 @@ fn assign(explained: &[u32], void: &[bool], states: usize, start: u32) -> Vec<us
       current[state] = (total.0 + cost, total.1 + rank);
       from[row * (states + 1) + state] = before as u8;
     }
-    previous = current;
+    std::mem::swap(&mut previous, &mut current);
   }
-  let (_, mut state) = previous
-    .iter()
-    .copied()
-    .zip(0..)
-    .min()
-    .expect("one state at least");
+  let (_, mut state) = cheapest(&previous);
   let mut assigned = vec![none; explained.len()];
   for row in (0..explained.len()).rev() {
     assigned[row] = state;
@@ -582,53 +632,54 @@ fn analyse_strip<'a>(input: &Input<'a>, x0: usize, x1: usize, report: &mut Shift
     x0,
     x1,
     top,
-    rows,
     base: signatures(&input.base),
     head: signatures(&input.head),
   };
 
   // Content is only ever looked for at distances whole rows were found at,
   // pixel for pixel: a shift is never invented from rows that merely look
-  // alike. Staying in place comes first.
-  let telling = strip.telling();
+  // alike.
+  let in_place = strip.in_place();
+  let telling = strip.telling(&in_place);
   let found = strip.displacements(&telling);
   if found.is_empty() {
     return;
   }
   let offsets: Vec<isize> = std::iter::once(0)
-    .chain(found.iter().map(|&(offset, _)| offset))
+    .chain(found.iter().map(|found| found.offset))
     .collect();
-  let seeds: Vec<&[usize]> = std::iter::once(&[][..])
-    .chain(found.iter().map(|(_, voters)| &voters[..]))
-    .collect();
-
-  let mut explained = strip.explain(&offsets, &seeds);
-  let anchors: Vec<bool> = (0..rows)
-    .map(|index| telling[index] && explained[index] & 1 == 0)
-    .collect();
-  keep_evidenced(&mut explained, &anchors, &offsets, input.min_rows);
+  let mut explained = strip.explain(&in_place, &found);
+  let evidence = Evidence::new(&telling);
+  keep_evidenced(&mut explained, &evidence, &offsets, input.min_rows);
 
   // One move per stretch of rows: a row that several moves explain — a flat
   // one, one of a repeated pattern, one of a block that moved by 23 rows
   // next to one that moved by 24 — stays with its neighbours. A block is
-  // worth starting for `min_rows` rows, and one the choice cuts down to less
-  // evidence than that is not one.
-  let void: Vec<bool> = strip.head.iter().map(|row| row.void).collect();
+  // worth starting for `min_rows` rows; one the choice cuts down to less
+  // evidence than that is not one, and the rows are given out again
+  // without that move.
   let none = offsets.len();
-  let mut assigned = assign(&explained, &void, offsets.len(), input.min_rows as u32 - 1);
-  let short: Vec<(usize, usize)> = blocks(&assigned)
-    .filter(|&(state, start, end)| {
-      state != 0
-        && state != none
-        && anchors[start..end].iter().filter(|&&anchor| anchor).count() < input.min_rows
-    })
-    .map(|(_, start, end)| (start, end))
-    .collect();
-  for (start, end) in short {
-    for index in start..end {
-      assigned[index] = if explained[index] & 1 != 0 { 0 } else { none };
+  let assigned = loop {
+    let assigned = assign(
+      &explained,
+      |row| strip.head[row].void,
+      offsets.len(),
+      input.min_rows as u32 - 1,
+    );
+    let short: Vec<(usize, usize, usize)> = blocks(&assigned)
+      .filter(|&(state, start, end)| {
+        state != 0 && state != none && evidence.within(start, end) < input.min_rows
+      })
+      .collect();
+    if short.is_empty() {
+      break assigned;
     }
-  }
+    for (state, start, end) in short {
+      explained[start..end]
+        .iter_mut()
+        .for_each(|bits| *bits &= !(1 << state));
+    }
+  };
 
   let mut base_used = vec![false; rows];
   let mut segments: Vec<ShiftSegment> = Vec::new();
@@ -817,20 +868,22 @@ mod tests {
 
   #[test]
   fn assignment_keeps_blocks_whole() {
-    let void = [false; 10];
+    let content = |_| false;
     // Rows 3.. fit move 1, and rows 5..7 move 2 as well: one block.
     let explained = [1, 1, 1, 2, 2, 6, 6, 2, 2, 2];
     assert_eq!(
-      assign(&explained, &void, 3, 4),
+      assign(&explained, content, 3, 4),
       [0, 0, 0, 1, 1, 1, 1, 1, 1, 1]
     );
     // A block costs more than the two rows it would explain, less than four.
     let explained = [1, 2, 2, 1, 1];
-    assert_eq!(assign(&explained, &void[..5], 2, 3), [0, 2, 2, 0, 0]);
-    let explained = [1, 2, 2, 2, 2, 0, 0, 0];
-    let void = [false, false, false, false, false, true, true, true];
+    assert_eq!(assign(&explained, content, 2, 3), [0, 2, 2, 0, 0]);
     // And padding left unexplained costs nothing.
-    assert_eq!(assign(&explained, &void, 2, 3), [0, 1, 1, 1, 1, 2, 2, 2]);
+    let explained = [1, 2, 2, 2, 2, 0, 0, 0];
+    assert_eq!(
+      assign(&explained, |row| row >= 5, 2, 3),
+      [0, 1, 1, 1, 1, 2, 2, 2]
+    );
   }
 
   #[test]
@@ -841,7 +894,7 @@ mod tests {
     let mut explained: Vec<u32> = (0..10)
       .map(|row| u32::from(row >= 2) << 1 | u32::from((5..8).contains(&row)) << 2)
       .collect();
-    keep_evidenced(&mut explained, &[true; 10], &offsets, 2);
+    keep_evidenced(&mut explained, &Evidence::new(&[true; 10]), &offsets, 2);
     let rows_of = |state: u32| {
       explained
         .iter()
@@ -852,7 +905,7 @@ mod tests {
 
     // Without rows that say where they are, a move explains nothing.
     let mut explained: Vec<u32> = (0..10).map(|row| u32::from(row >= 2) << 1).collect();
-    keep_evidenced(&mut explained, &[false; 10], &offsets, 2);
+    keep_evidenced(&mut explained, &Evidence::new(&[false; 10]), &offsets, 2);
     assert!(explained.iter().all(|&bits| bits == 0));
   }
 }

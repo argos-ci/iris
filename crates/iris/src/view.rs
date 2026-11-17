@@ -119,6 +119,18 @@ impl<'a> View<'a> {
   }
 }
 
+/// Pixels compared at once when looking for the first that differs.
+pub(crate) const CHUNK: usize = 8;
+
+/// Whether two chunks of `CHUNK` pixels are equal, compared as fixed-size
+/// arrays.
+#[inline(always)]
+pub(crate) fn chunk_is_equal(a: &[u32], b: &[u32]) -> bool {
+  let a: &[u32; CHUNK] = a.try_into().expect("chunk length");
+  let b: &[u32; CHUNK] = b.try_into().expect("chunk length");
+  a == b
+}
+
 /// Part of a row of the canvas: pixels of the image, then transparent ones.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Row<'a> {
