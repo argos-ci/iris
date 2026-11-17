@@ -40,7 +40,7 @@ use std::collections::HashMap;
 use crate::antialias::Noise;
 use crate::delta::within;
 use crate::mask::{Mask, Rect};
-use crate::view::{chunk_is_equal, Row, View, CHUNK};
+use crate::view::{Row, View, CHUNK};
 
 /// Columns without a difference narrower than this do not split a strip:
 /// the gap between two words is not the gap between two page columns.
@@ -203,13 +203,10 @@ fn matches(
   let mut pass =
     |x: usize, pixel: u32, other: u32| within(other, pixel, max_delta) || otherwise(x, pixel);
   let shared = now.pixels.len().min(before.pixels.len());
-  let chunks = now.pixels[..shared]
-    .chunks_exact(CHUNK)
-    .zip(before.pixels[..shared].chunks_exact(CHUNK));
-  for (index, (now, before)) in chunks.enumerate() {
-    if !chunk_is_equal(now, before)
-      && !(0..CHUNK).all(|at| pass(index * CHUNK + at, now[at], before[at]))
-    {
+  let (now_chunks, _) = now.pixels[..shared].as_chunks::<CHUNK>();
+  let (before_chunks, _) = before.pixels[..shared].as_chunks::<CHUNK>();
+  for (index, (now, before)) in now_chunks.iter().zip(before_chunks).enumerate() {
+    if now != before && !(0..CHUNK).all(|at| pass(index * CHUNK + at, now[at], before[at])) {
       return false;
     }
   }
