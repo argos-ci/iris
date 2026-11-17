@@ -58,8 +58,9 @@ export interface DiffOptions {
   /** Look for content that moved rather than changed. Defaults to true. */
   shifts?: boolean
   /**
-   * Fewest consecutive rows that must move together to count as a shift.
-   * Defaults to 4.
+   * Fewest rows of content that must move together to count as a shift:
+   * rows of plain background, which fit anywhere, do not count. Defaults
+   * to 4.
    */
   minShiftRows?: number
   /**

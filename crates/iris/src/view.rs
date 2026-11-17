@@ -40,6 +40,32 @@ impl<'a> View<'a> {
     }
   }
 
+  /// The view without its first `rows` rows of canvas: row `y` of the
+  /// result is row `y + rows` of this one.
+  pub fn skip_rows(&self, rows: usize) -> Self {
+    let skipped = rows.min(self.rows);
+    Self {
+      pixels: &self.pixels[skipped * self.stride..],
+      stride: self.stride,
+      rows: self.rows - skipped,
+      width: self.width,
+      height: self.height.saturating_sub(rows),
+    }
+  }
+
+  /// The view cut to its first `height` rows of canvas: below them, the
+  /// image is off the canvas too.
+  pub fn crop(&self, height: usize) -> Self {
+    let rows = self.rows.min(height);
+    Self {
+      pixels: &self.pixels[..rows * self.stride],
+      stride: self.stride,
+      rows,
+      width: self.width,
+      height: self.height.min(height),
+    }
+  }
+
   /// Width and height of the image itself.
   pub fn image_size(&self) -> (usize, usize) {
     (self.stride, self.rows)
@@ -106,6 +132,10 @@ impl<'a> View<'a> {
   }
 }
 
+/// Pixels compared at once, as one array, when looking for the first that
+/// differs.
+pub(crate) const CHUNK: usize = 8;
+
 /// Part of a row of the canvas: pixels of the image, then transparent ones.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Row<'a> {
@@ -114,6 +144,12 @@ pub(crate) struct Row<'a> {
 }
 
 impl Row<'_> {
+  /// The pixel at `x`, transparent past the image.
+  #[inline(always)]
+  pub fn get(&self, x: usize) -> u32 {
+    self.pixels.get(x).copied().unwrap_or(0)
+  }
+
   pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
     self
       .pixels
@@ -175,6 +211,31 @@ mod tests {
     let whole = numbered(5, 1);
     let whole = View::new(&whole, 5, 1);
     assert_eq!(whole.full_row(0, &mut scratch), [1, 2, 3, 4, 5]);
+  }
+
+  #[test]
+  fn skips_and_crops_rows_of_canvas() {
+    let image = numbered(2, 3);
+    let view = View::new(&image, 2, 5);
+    let skipped = view.skip_rows(1);
+    assert_eq!(
+      (skipped.at(0, 0), skipped.at(1, 1), skipped.at(0, 2)),
+      (3, 6, 0)
+    );
+    assert_eq!((skipped.height, skipped.image_size()), (4, (2, 2)));
+    // Past the image, nothing is left but canvas.
+    let beyond = view.skip_rows(4);
+    assert_eq!(
+      (beyond.at(0, 0), beyond.height, beyond.image_size()),
+      (0, 1, (2, 0))
+    );
+
+    // A crop leaves no image below the canvas, for any detector to read.
+    let cropped = view.crop(2);
+    assert_eq!((cropped.height, cropped.image_size()), (2, (2, 2)));
+    assert_eq!((cropped.at(1, 1), cropped.at(0, 2)), (4, 0));
+    assert!(!cropped.surrounds(1, 1));
+    assert_eq!(view.crop(9).height, 5);
   }
 
   #[test]

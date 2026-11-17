@@ -11,7 +11,9 @@
 //! brightness is compared in floating point, ties going to the neighbour met
 //! first — because the result has to match pixel for pixel.
 
-use crate::delta::brightness;
+use crate::delta::{brightness, max_delta};
+use crate::options::Antialiasing;
+use crate::subpixel::is_subpixel_shift;
 use crate::view::View;
 
 /// The 3x3 block of pixels centred on a pixel, row by row. Slots that fall
@@ -127,6 +129,35 @@ fn detect(image: &View, other: &View, x: usize, y: usize) -> bool {
 #[inline]
 pub(crate) fn is_antialiased(base: &View, head: &View, x: usize, y: usize) -> bool {
   detect(base, head, x, y) || detect(head, base, x, y)
+}
+
+/// The detector a comparison leaves rendering noise out of every tier with.
+#[derive(Clone, Copy)]
+pub(crate) struct Noise {
+  antialiasing: Antialiasing,
+  /// What "unchanged" means to the sub-pixel detector: under the most
+  /// sensitive tier, and never looser than a barely visible difference.
+  same: i64,
+}
+
+impl Noise {
+  /// `lowest` is the threshold of the most sensitive tier.
+  pub fn new(antialiasing: Antialiasing, lowest: i64) -> Self {
+    Self {
+      antialiasing,
+      same: lowest.min(max_delta(0.025)),
+    }
+  }
+
+  /// Whether the differing pixel at `(x, y)` is noise rather than change.
+  #[inline]
+  pub fn at(&self, base: &View, head: &View, x: usize, y: usize) -> bool {
+    match self.antialiasing {
+      Antialiasing::Off => false,
+      Antialiasing::Classic => is_antialiased(base, head, x, y),
+      Antialiasing::Subpixel => is_subpixel_shift(base, head, x, y, self.same),
+    }
+  }
 }
 
 #[cfg(test)]

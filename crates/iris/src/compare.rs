@@ -1,12 +1,11 @@
-use crate::antialias::is_antialiased;
+use crate::antialias::Noise;
 use crate::delta::{color_delta, max_delta};
 use crate::error::{Error, Result};
 use crate::image::Image;
 use crate::mask::{Extent, Mask};
-use crate::options::{Antialiasing, Options, MAX_TIERS};
+use crate::options::{Options, MAX_TIERS};
 use crate::shift::{self, ShiftReport};
-use crate::subpixel::is_subpixel_shift;
-use crate::view::View;
+use crate::view::{View, CHUNK};
 
 /// What one [`Tier`](crate::Tier) saw.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -63,15 +62,6 @@ struct Scan {
   raw_columns: Vec<u64>,
 }
 
-const CHUNK: usize = 8;
-
-#[inline(always)]
-fn chunk_is_equal(a: &[u32], b: &[u32]) -> bool {
-  let a: &[u32; CHUNK] = a.try_into().expect("chunk length");
-  let b: &[u32; CHUNK] = b.try_into().expect("chunk length");
-  a == b
-}
-
 /// What one band of rows contributes to a [`Scan`].
 struct Band {
   histogram: [u64; MAX_TIERS + 1],
@@ -93,7 +83,7 @@ fn scan_rows(
   first_row: usize,
   planes: &mut [&mut [u8]],
   max_deltas: &[i64],
-  antialiasing: Antialiasing,
+  noise: Noise,
 ) -> Band {
   let width = base.width;
   let stride = width.div_ceil(8);
@@ -105,9 +95,6 @@ fn scan_rows(
   let mut raw_columns = vec![0u64; width.div_ceil(64)];
   let (mut base_scratch, mut head_scratch) = (Vec::new(), Vec::new());
   let lowest = max_deltas[0];
-  // What "unchanged" means to the sub-pixel detector: under the most
-  // sensitive tier, and never looser than a barely visible difference.
-  let same = lowest.min(max_delta(0.025));
 
   for row in 0..rows {
     let y = first_row + row;
@@ -118,10 +105,12 @@ fn scan_rows(
     }
     raw_rows = Some((raw_rows.map_or(y, |(first, _)| first), y));
 
+    let (base_chunks, _) = base_row.as_chunks::<CHUNK>();
+    let (head_chunks, _) = head_row.as_chunks::<CHUNK>();
     let mut x = 0;
     while x < width {
       let end = (x + CHUNK).min(width);
-      if end - x == CHUNK && chunk_is_equal(&base_row[x..end], &head_row[x..end]) {
+      if end - x == CHUNK && base_chunks[x / CHUNK] == head_chunks[x / CHUNK] {
         x = end;
         continue;
       }
@@ -136,12 +125,7 @@ fn scan_rows(
         if delta <= lowest {
           continue;
         }
-        let is_noise = match antialiasing {
-          Antialiasing::Off => false,
-          Antialiasing::Classic => is_antialiased(&base, &head, x, y),
-          Antialiasing::Subpixel => is_subpixel_shift(&base, &head, x, y, same),
-        };
-        if is_noise {
+        if noise.at(&base, &head, x, y) {
           antialiased += 1;
           continue;
         }
@@ -183,13 +167,7 @@ const BAND_ROWS: usize = 32;
 /// Scan the two images in bands of rows, shared out between threads as they
 /// free up. A pixel's class depends on nothing another band writes, so the
 /// result is the same whatever the number of threads.
-fn scan(
-  base: View,
-  head: View,
-  max_deltas: &[i64],
-  antialiasing: Antialiasing,
-  threads: usize,
-) -> Scan {
+fn scan(base: View, head: View, max_deltas: &[i64], noise: Noise, threads: usize) -> Scan {
   let (width, height) = (base.width, base.height);
   let stride = width.div_ceil(8);
   let mut planes: Vec<Vec<u8>> = max_deltas
@@ -228,7 +206,7 @@ fn scan(
         band * BAND_ROWS,
         &mut planes,
         max_deltas,
-        antialiasing,
+        noise,
       ));
     }
   };
@@ -343,13 +321,8 @@ pub fn compare(base: &Image, head: &Image, options: &Options) -> Result<Comparis
     .map(|&index| max_delta(options.tiers[index].threshold))
     .collect();
 
-  let scan = scan(
-    base_view,
-    head_view,
-    &max_deltas,
-    options.antialiasing,
-    options.threads,
-  );
+  let noise = Noise::new(options.antialiasing, max_deltas[0]);
+  let scan = scan(base_view, head_view, &max_deltas, noise, options.threads);
 
   let pixels = width as f64 * height as f64;
   let mut tiers = vec![
@@ -419,6 +392,8 @@ pub fn compare(base: &Image, head: &Image, options: &Options) -> Result<Comparis
         raw_rows,
         raw_columns: &scan.raw_columns,
         mask: &mask,
+        max_delta: max_deltas[rank],
+        noise,
         min_rows: options.min_shift_rows as usize,
       });
     }
@@ -432,7 +407,7 @@ pub fn compare(base: &Image, head: &Image, options: &Options) -> Result<Comparis
 mod tests {
   use super::*;
   use crate::mask::Rect;
-  use crate::options::Tier;
+  use crate::options::{Antialiasing, Tier};
 
   const WHITE: [u8; 4] = [255, 255, 255, 255];
   const BLACK: [u8; 4] = [0, 0, 0, 255];

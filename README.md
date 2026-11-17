@@ -122,10 +122,23 @@ lights up the whole page. `result.shift` says how much of the diff is that:
 }
 ```
 
-Rows are matched by hash within the columns that differ, so a sidebar that
-stayed put does not stop the page next to it from matching. Matching is exact:
-a shift is never invented, and content that moved _and_ was re-rendered is not
-found. Vertical movement only.
+Rows are compared within the columns that differ, so a sidebar that stayed put
+does not stop the page next to it from matching. Only distances whole rows
+were found to have moved by, pixel for pixel, are tried, and only where rows of
+content show it: a shift is never invented. Background between a card's
+borders fits anywhere and proves nothing, and a copy of content that is still
+where it was is new, not moved.
+
+From there, a row counts as moved when none of its pixels would be in the
+mask. Browsers lay content out at fractional positions and render it anew where
+it lands: a block that moves by 23.5 pixels ends up partly 23 and partly 24
+pixels down, its gradients dithered and its edges anti-aliased afresh. Exact
+matching cut such a block into dozens of pieces and lost the rows that no
+longer matched at all; it is now one block. Vertical movement only.
+
+`cargo run --release -p iris --example shifts -- DIR` reports, for pairs of
+`NAME.base.png` and `NAME.head.png` in `DIR`, how much of each diff movement
+explains.
 
 ## API
 
@@ -145,7 +158,7 @@ decoded, told apart by their signature.
 | `exactScore`   | `false`     | see below                                                         |
 | `fingerprint`  | `true`      |                                                                   |
 | `shifts`       | `true`      |                                                                   |
-| `minShiftRows` | `4`         | fewest rows that must move together                               |
+| `minShiftRows` | `4`         | fewest rows of content that must move together                    |
 | `maxPixels`    |             | reject canvases over this size, before decoding                   |
 | `threads`      | up to 4     | for the scan, above a megapixel; the result does not depend on it |
 | `output`       |             | write the mask there instead of returning it in `mask.data`       |
