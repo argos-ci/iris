@@ -5,7 +5,7 @@ use crate::image::Image;
 use crate::mask::{Extent, Mask};
 use crate::options::{Options, MAX_TIERS};
 use crate::shift::{self, ShiftReport};
-use crate::view::{chunk_is_equal, View, CHUNK};
+use crate::view::{View, CHUNK};
 
 /// What one [`Tier`](crate::Tier) saw.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -105,10 +105,12 @@ fn scan_rows(
     }
     raw_rows = Some((raw_rows.map_or(y, |(first, _)| first), y));
 
+    let (base_chunks, _) = base_row.as_chunks::<CHUNK>();
+    let (head_chunks, _) = head_row.as_chunks::<CHUNK>();
     let mut x = 0;
     while x < width {
       let end = (x + CHUNK).min(width);
-      if end - x == CHUNK && chunk_is_equal(&base_row[x..end], &head_row[x..end]) {
+      if end - x == CHUNK && base_chunks[x / CHUNK] == head_chunks[x / CHUNK] {
         x = end;
         continue;
       }

@@ -3,7 +3,7 @@
 
 mod support;
 
-use iris::{compare, Comparison, Image, Options, Rect, ShiftSegment};
+use iris::{compare, Antialiasing, Comparison, Image, Options, Rect, ShiftSegment};
 
 const WHITE: [u8; 4] = [255, 255, 255, 255];
 const INK: [u8; 4] = [20, 24, 40, 255];
@@ -292,20 +292,76 @@ fn content_moved_by_a_fraction_of_a_row_is_one_shift() {
   ]
   .concat();
 
+  // Whichever detector leaves noise out of the mask.
+  for antialiasing in [
+    Antialiasing::Off,
+    Antialiasing::Classic,
+    Antialiasing::Subpixel,
+  ] {
+    let options = Options {
+      antialiasing,
+      ..Options::default()
+    };
+    let result = compare(&page(&base), &page(&head), &options).unwrap();
+    let shift = result.shift.expect("a shift");
+
+    // One block, which moved by 23 rows and a half: no seam where the two
+    // halves meet.
+    assert_eq!(shift.segments.len(), 1, "{antialiasing:?}: {shift:?}");
+    let segment = shift.segments[0];
+    assert!([23, 24].contains(&segment.dy()), "{segment:?}");
+    assert_eq!(
+      (segment.head_y, segment.head_y + segment.height),
+      (113, 384)
+    );
+    assert_eq!(shift.inserted, [band(0, 90, 200, 23)]);
+    assert_eq!(shift.removed, []);
+    assert_eq!(result.diff_pixels - shift.shifted_pixels, 23 * 200);
+  }
+}
+
+#[test]
+fn an_edge_rendered_anew_where_it_moved_to_is_noise() {
+  // A rule down the page, between two columns of text, that starts at a
+  // fraction of a row: where the page moved to, its first pixel is a blend
+  // rather than ink. That pixel matches nothing it could have come from,
+  // but it is anti-aliasing, as the mask would have it.
+  let width = 160;
+  let mut base = text(width, 0..12);
+  for row in &mut base[100..160] {
+    row[80] = INK;
+  }
+  let mut head = base.clone();
+  head.splice(36..36, block(width, 12, BANNER));
+  head[112][80] = [128, 130, 138, 255];
+
   let result = diff(&base, &head);
   let shift = result.shift.expect("a shift");
+  assert_eq!(shift.segments, [segment(0, 160, 36, 48, 180)]);
+  assert_eq!(shift.inserted, [band(0, 36, 160, 12)]);
+}
 
-  // One block, which moved by 23 rows and a half: no seam where the two
-  // halves meet.
-  assert_eq!(shift.segments.len(), 1, "{:?}", shift.segments);
-  let segment = shift.segments[0];
-  assert!([23, 24].contains(&segment.dy()), "{segment:?}");
+#[test]
+fn a_copy_of_content_still_in_place_is_inserted() {
+  // The fourth line is reworded where it stands, and further down a copy
+  // of the sixth line goes in, pushing the rest down. The sixth line has not
+  // moved: the copy is new, not moved from it.
+  let width = 160;
+  let base = text(width, 0..16);
+  let mut head = base.clone();
+  head.splice(54..72, text_line(width, 900));
+  head.splice(162..162, base[90..108].to_vec());
+
+  let shift = diff(&base, &head).shift.expect("a shift");
+  // The lines below the copy moved down, with the copy's blank leading,
+  // which fits there as well as anywhere.
+  assert_eq!(shift.segments, [segment(0, 160, 156, 174, 132)]);
+  // The reworded line's glyphs and the copy's.
   assert_eq!(
-    (segment.head_y, segment.head_y + segment.height),
-    (113, 384)
+    shift.inserted,
+    [band(0, 54, 160, 12), band(0, 162, 160, 12)]
   );
-  assert_eq!(shift.inserted, [band(0, 90, 200, 23)]);
-  assert_eq!(result.diff_pixels - shift.shifted_pixels, 23 * 200);
+  assert_eq!(shift.removed, [band(0, 54, 160, 12)]);
 }
 
 /// Rows of text over a light grey that alternates by one level from row to
