@@ -273,3 +273,133 @@ fn the_minimum_shift_height_is_configurable() {
   let result = compare(&page(&base), &page(&head), &options).unwrap();
   assert_eq!(result.shift, None);
 }
+
+const BANNER: [u8; 4] = [200, 30, 30, 255];
+
+#[test]
+fn content_moved_by_a_fraction_of_a_row_is_one_shift() {
+  // A banner 23.5 rows tall: the browser snaps the lines below it 23 or 24
+  // rows down, each on its own. The first seven land 23 rows down, the rest
+  // 24, with a row of leading more between the two.
+  let width = 200;
+  let base = text(width, 0..20);
+  let head = [
+    &base[..90],
+    &block(width, 23, BANNER),
+    &base[90..216],
+    &block(width, 1, WHITE),
+    &base[216..],
+  ]
+  .concat();
+
+  let result = diff(&base, &head);
+  let shift = result.shift.expect("a shift");
+
+  // One block, which moved by 23 rows and a half: no seam where the two
+  // halves meet.
+  assert_eq!(shift.segments.len(), 1, "{:?}", shift.segments);
+  let segment = shift.segments[0];
+  assert!([23, 24].contains(&segment.dy()), "{segment:?}");
+  assert_eq!(
+    (segment.head_y, segment.head_y + segment.height),
+    (113, 384)
+  );
+  assert_eq!(shift.inserted, [band(0, 90, 200, 23)]);
+  assert_eq!(result.diff_pixels - shift.shifted_pixels, 23 * 200);
+}
+
+/// Rows of text over a light grey that alternates by one level from row to
+/// row, the way a browser dithers a gradient: the pattern belongs to the
+/// screen, so it does not move with the page. `first_row` is where the rows
+/// sit on the screen.
+fn dithered(rows: &[Row], first_row: usize) -> Vec<Row> {
+  rows
+    .iter()
+    .enumerate()
+    .map(|(y, row)| {
+      let level = 240 + ((first_row + y) % 2) as u8;
+      row
+        .iter()
+        .map(|&pixel| {
+          if pixel == WHITE {
+            [level, level, level, 255]
+          } else {
+            pixel
+          }
+        })
+        .collect()
+    })
+    .collect()
+}
+
+#[test]
+fn content_rendered_anew_where_it_moved_to_is_found() {
+  // A section of text on white, then one on a dithered grey. A banner with
+  // an odd number of rows pushes both down: the white section lands as it
+  // was, but no row of the grey one does — its background is dithered the
+  // other way round. Moving explains it all the same.
+  let width = 180;
+  let plain = text(width, 0..6);
+  let shaded = text(width, 6..16);
+  let base = [plain.clone(), dithered(&shaded, 108)].concat();
+  let head = [
+    &plain[..36],
+    &block(width, 13, BANNER),
+    &plain[36..],
+    &dithered(&shaded, 121),
+  ]
+  .concat();
+
+  let result = diff(&base, &head);
+  let shift = result.shift.expect("a shift");
+  assert_eq!(shift.segments, [segment(0, 180, 36, 49, 252)]);
+  assert_eq!(shift.inserted, [band(0, 36, 180, 13)]);
+  assert_eq!(shift.removed, []);
+  assert_eq!(result.diff_pixels - shift.shifted_pixels, 13 * 180);
+}
+
+#[test]
+fn new_content_that_looks_like_old_is_inserted() {
+  // A copy of the twelfth line goes in after the third. The twelfth line
+  // itself is still there, eighteen rows lower: the copy is new, however
+  // alike the two are.
+  let width = 160;
+  let base = text(width, 0..16);
+  let mut head = base.clone();
+  head.splice(54..54, base[198..216].to_vec());
+
+  let shift = diff(&base, &head).shift.expect("a shift");
+  assert_eq!(shift.segments, [segment(0, 160, 54, 72, 234)]);
+  // The copy's twelve rows of glyphs. Its leading is blank, as was what
+  // stood there before: that stayed in place.
+  assert_eq!(shift.inserted, [band(0, 54, 160, 12)]);
+  assert_eq!(shift.removed, []);
+}
+
+/// Rows framed by a border down each side, as in a card.
+fn framed(rows: &[Row]) -> Vec<Row> {
+  rows
+    .iter()
+    .map(|row| {
+      let mut row = row.clone();
+      let last = row.len() - 1;
+      (row[0], row[last]) = (INK, INK);
+      row
+    })
+    .collect()
+}
+
+#[test]
+fn rows_with_nothing_to_tell_do_not_make_a_shift() {
+  // A card of three lines of text over forty blank rows. The text is
+  // reworded into two lines, so the blank rows start higher. Each of them
+  // equals every other one, border for border: they fit anywhere, and say
+  // nothing about where they came from.
+  let width = 150;
+  let base = framed(&[text(width, 0..3), block(width, 40, WHITE)].concat());
+  let head = framed(&[text(width, 100..102), block(width, 58, WHITE)].concat());
+
+  let result = diff(&base, &head);
+  assert!(result.score > 0.0);
+  assert_eq!(result.shift, None);
+}

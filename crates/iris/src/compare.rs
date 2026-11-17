@@ -419,6 +419,9 @@ pub fn compare(base: &Image, head: &Image, options: &Options) -> Result<Comparis
         raw_rows,
         raw_columns: &scan.raw_columns,
         mask: &mask,
+        max_delta: max_deltas[rank],
+        antialiasing: options.antialiasing,
+        same: max_deltas[0].min(max_delta(0.025)),
         min_rows: options.min_shift_rows as usize,
       });
     }

@@ -40,6 +40,19 @@ impl<'a> View<'a> {
     }
   }
 
+  /// The view without its first `rows` rows of canvas: row `y` of the
+  /// result is row `y + rows` of this one.
+  pub fn skip_rows(&self, rows: usize) -> Self {
+    let skipped = rows.min(self.rows);
+    Self {
+      pixels: &self.pixels[skipped * self.stride..],
+      stride: self.stride,
+      rows: self.rows - skipped,
+      width: self.width,
+      height: self.height.saturating_sub(rows),
+    }
+  }
+
   /// Width and height of the image itself.
   pub fn image_size(&self) -> (usize, usize) {
     (self.stride, self.rows)
@@ -114,6 +127,12 @@ pub(crate) struct Row<'a> {
 }
 
 impl Row<'_> {
+  /// The pixel at `x`, transparent past the image.
+  #[inline(always)]
+  pub fn get(&self, x: usize) -> u32 {
+    self.pixels.get(x).copied().unwrap_or(0)
+  }
+
   pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
     self
       .pixels

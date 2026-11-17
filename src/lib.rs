@@ -51,8 +51,9 @@ pub struct JsDiffOptions {
   pub fingerprint: Option<bool>,
   /// Look for content that moved rather than changed. Defaults to true.
   pub shifts: Option<bool>,
-  /// Fewest consecutive rows that must move together to count as a shift.
-  /// Defaults to 4.
+  /// Fewest rows of content that must move together to count as a shift:
+  /// rows of plain background, which fit anywhere, do not count. Defaults
+  /// to 4.
   pub min_shift_rows: Option<u32>,
   /// Refuse to compare when the larger width times the larger height exceeds
   /// this many pixels. Checked from the image headers, before anything is

@@ -74,7 +74,8 @@ pub struct Options {
   pub fingerprint: bool,
   /// Look for content that moved rather than changed.
   pub shifts: bool,
-  /// Fewest consecutive rows that must move together to count as a shift.
+  /// Fewest rows of content that must move together to count as a shift:
+  /// rows of plain background, which fit anywhere, do not count.
   pub min_shift_rows: u32,
   /// Refuse canvases larger than this many pixels, before decoding anything.
   /// A comparison holds both images, four bytes a pixel each, and a quarter
