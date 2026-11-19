@@ -3,7 +3,7 @@
 
 mod support;
 
-use iris::{compare, Antialiasing, Comparison, Image, Options, Rect, ShiftSegment};
+use iris::{compare, Antialiasing, Comparison, Image, Mask, Options, Rect, ShiftSegment};
 
 const WHITE: [u8; 4] = [255, 255, 255, 255];
 const INK: [u8; 4] = [20, 24, 40, 255];
@@ -467,12 +467,12 @@ fn rows_with_nothing_to_tell_do_not_make_a_shift() {
 fn left_over(result: &Comparison) -> Option<Rect> {
   let shift = result.shift.as_ref().expect("a shift");
   let mask = result.mask.as_ref().expect("a mask");
-  let (width, height) = (mask.width() as usize, mask.height() as usize);
-  let mut cover = vec![0u8; width * height];
+  let width = mask.width();
+  let mut cover = vec![0u8; (width * mask.height()) as usize];
   for rect in &shift.hidden {
     for y in rect.y..rect.y + rect.height {
       for x in rect.x..rect.x + rect.width {
-        cover[y as usize * width + x as usize] += 1;
+        cover[(y * width + x) as usize] += 1;
       }
     }
   }
@@ -480,25 +480,11 @@ fn left_over(result: &Comparison) -> Option<Rect> {
     cover.iter().all(|&count| count <= 1),
     "hidden areas overlap"
   );
-  let mut hidden = 0;
-  let mut bounds: Option<(u32, u32, u32, u32)> = None;
-  for y in 0..height as u32 {
-    for x in 0..width as u32 {
-      if !mask.is_set(x, y) {
-        continue;
-      }
-      if cover[y as usize * width + x as usize] == 1 {
-        hidden += 1;
-        continue;
-      }
-      bounds = Some(match bounds {
-        None => (x, y, x, y),
-        Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
-      });
-    }
-  }
-  assert_eq!(hidden, shift.shifted_pixels);
-  bounds.map(|(x0, y0, x1, y1)| band(x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+  let left = Mask::from_fn(width, mask.height(), |x, y| {
+    mask.is_set(x, y) && cover[(y * width + x) as usize] == 0
+  });
+  assert_eq!(mask.count() - left.count(), shift.shifted_pixels);
+  left.bounds()
 }
 
 /// Whether `inner` lies inside `outer`.

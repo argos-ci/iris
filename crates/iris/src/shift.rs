@@ -165,14 +165,10 @@ pub(crate) fn detect(input: &Input) -> Option<ShiftReport> {
 
 /// Group the differing columns into strips, as inclusive ranges.
 fn strips(columns: &[u64], width: usize) -> Vec<(usize, usize)> {
-  let is_set = |x: usize| columns[x / 64] & (1 << (x % 64)) != 0;
-  let mut strips: Vec<(usize, usize)> = Vec::new();
-  for x in (0..width).filter(|&x| is_set(x)) {
-    match strips.last_mut() {
-      Some((_, end)) if x - *end <= STRIP_GAP => *end = x,
-      _ => strips.push((x, x)),
-    }
-  }
+  let set: Vec<usize> = (0..width)
+    .filter(|&x| columns[x / 64] & (1 << (x % 64)) != 0)
+    .collect();
+  let strips = clusters(&set, STRIP_GAP - 1);
   if strips.len() > MAX_STRIPS {
     let (first, last) = (strips[0].0, strips[strips.len() - 1].1);
     return vec![(first, last)];
@@ -223,15 +219,24 @@ fn signature(row: Row, void: bool) -> Signature {
     .unwrap_or(length);
   // Past the image, pixels are transparent, and so is the last one: the
   // padding goes with the rest of the background.
-  let right = row
-    .pixels
-    .iter()
-    .rposition(|&pixel| pixel != last)
-    .map_or(0, |x| x + 1);
-  let content = row.iter().skip(left).take(right.saturating_sub(left));
+  let right = match left {
+    left if left == length => left,
+    _ => row
+      .pixels
+      .iter()
+      .rposition(|&pixel| pixel != last)
+      .map_or(0, |x| x + 1),
+  };
+  let pixels = row.iter().skip(left).take(right.saturating_sub(left));
+  let content = mix(first as u64 | (last as u64) << 32, pixels);
   Signature {
-    hash: mix(length as u64, row.iter()),
-    content: mix(first as u64 | (last as u64) << 32, content),
+    // The same content between the same backgrounds, at the same place:
+    // the same row.
+    hash: mix(
+      content,
+      [left, right, length].map(|at| at as u32).into_iter(),
+    ),
+    content,
     left,
     flat: left == length,
     void,
@@ -518,25 +523,22 @@ impl<'a> Strip<'_, 'a> {
   /// right of where it came from, and the noise detector judges what is
   /// left on windows of both images lined up for the move.
   fn explains_across(&self, index: usize, source: usize, dx: isize, slack: bool) -> bool {
+    let input = self.input;
     let rows = self.rows();
-    let base = self.input.base;
     // One column more on either side, for the slack.
-    let shifted = |source: usize| -> Option<Vec<u32>> {
-      (source < rows && !self.base[source].void).then(|| {
-        (self.x0..=self.x1 + 2)
-          .map(|x| {
-            x.checked_add_signed(-dx - 1)
-              .map_or(0, |x| base.at(x, self.top + source))
-          })
-          .collect()
-      })
+    let shifted = |source: usize| -> Vec<u32> {
+      self
+        .padded(input.base, Some(self.top + source), dx, 1)
+        .collect()
     };
-    let Some(before) = shifted(source) else {
-      return false;
+    let before = shifted(source);
+    let around = |source: Option<usize>| {
+      source
+        .filter(|&source| slack && source < rows && !self.base[source].void)
+        .map(shifted)
     };
-    let around = |source: Option<usize>| source.filter(|_| slack).and_then(shifted);
     let (above, below) = (around(source.checked_sub(1)), around(Some(source + 1)));
-    let max_delta = self.input.max_delta;
+    let max_delta = input.max_delta;
     // An edge drawn at a fractional column is drawn anew: its pixels blend
     // the two on either side of it in proportions of their own, and a glyph
     // rendered at another phase shifts its ink by a few levels. With slack,
@@ -544,7 +546,7 @@ impl<'a> Strip<'_, 'a> {
     // channel, is that edge, and so is one the least sensitive tier would
     // take for one of them. A flat area has no two sides: a change of colour
     // there still shows.
-    let edge_delta = self.input.edge_delta.max(max_delta);
+    let edge_delta = input.edge_delta.max(max_delta);
     let near = |row: &[u32], x: usize, pixel: u32| {
       if !slack {
         return within(row[x + 1], pixel, max_delta);
@@ -570,41 +572,49 @@ impl<'a> Strip<'_, 'a> {
         .flatten()
         .any(|row| near(row, x, pixel))
     };
-    if matches(now, before_row, max_delta, close) {
-      return true;
-    }
     // The noise detectors read the pixels around the one they judge: they
     // get both images, lined up for the move, around the two rows.
-    let width = self.x1 - self.x0 + 1 + 2 * WINDOW;
-    let (base, head) = (
-      self.window(self.input.base, self.top + source, dx),
-      self.window(self.input.head, self.top + index, 0),
-    );
-    let height = 2 * WINDOW + 1;
-    let (base, head) = (
-      View::new(&base, width, height),
-      View::new(&head, width, height),
-    );
+    let mut windows: Option<(Image, Image)> = None;
     matches(now, before_row, max_delta, |x, pixel| {
-      close(x, pixel) || self.input.noise.at(&base, &head, x + WINDOW, WINDOW)
+      close(x, pixel) || {
+        let (base, head) = windows.get_or_insert_with(|| {
+          (
+            self.window(input.base, self.top + source, dx),
+            self.window(input.head, self.top + index, 0),
+          )
+        });
+        let (width, height) = (base.width() as usize, base.height() as usize);
+        let (base, head) = (
+          View::new(base, width, height),
+          View::new(head, width, height),
+        );
+        input.noise.at(&base, &head, x + WINDOW, WINDOW)
+      }
     })
   }
 
-  /// Rows `y - WINDOW..=y + WINDOW` of `view`, over the strip's columns and
-  /// `WINDOW` more on either side, read `dx` columns left.
-  fn window(&self, view: View, y: usize, dx: isize) -> Image {
+  /// Canvas row `y` of `view` over the strip's columns and `pad` more on
+  /// either side, read `dx` columns left: transparent off the canvas.
+  fn padded(
+    &self,
+    view: View<'a>,
+    y: Option<usize>,
+    dx: isize,
+    pad: usize,
+  ) -> impl Iterator<Item = u32> + use<'_, 'a> {
+    (0..self.x1 - self.x0 + 1 + 2 * pad).map(move |column| {
+      match ((self.x0 + column).checked_add_signed(-dx - pad as isize), y) {
+        (Some(x), Some(y)) => view.at(x, y),
+        _ => 0,
+      }
+    })
+  }
+
+  /// Rows `y - WINDOW..=y + WINDOW` of `view`, padded by `WINDOW`.
+  fn window(&self, view: View<'a>, y: usize, dx: isize) -> Image {
     let width = self.x1 - self.x0 + 1 + 2 * WINDOW;
     let pixels = (0..=2 * WINDOW)
-      .flat_map(|row| {
-        let y = (y + row).checked_sub(WINDOW);
-        (0..width).map(move |column| {
-          let x = (self.x0 + column).checked_add_signed(-dx - WINDOW as isize);
-          match (x, y) {
-            (Some(x), Some(y)) => view.at(x, y),
-            _ => 0,
-          }
-        })
-      })
+      .flat_map(|row| self.padded(view, (y + row).checked_sub(WINDOW), dx, WINDOW))
       .collect();
     Image::new(width as u32, (2 * WINDOW + 1) as u32, pixels).expect("pixels for the window")
   }
@@ -871,8 +881,6 @@ fn differing_rows(
 /// The rows of a strip, told apart: what each head row is, and whether
 /// each base row went anywhere.
 struct Analysis {
-  x0: usize,
-  x1: usize,
   /// Canvas row of index 0.
   top: usize,
   /// Per row, whether the head row is accounted for: in place, moved
@@ -881,8 +889,6 @@ struct Analysis {
   /// Per row, whether the base row is: still there, moved elsewhere,
   /// padding, or more of the plain rows next to one that is.
   base: Vec<bool>,
-  /// Largest distance a block of the strip moved by.
-  reach: usize,
   segments: Vec<ShiftSegment>,
 }
 
@@ -891,18 +897,16 @@ impl Analysis {
     self.top + self.head.len() - 1
   }
 
-  /// Whether the head row at canvas row `y` is accounted for. Outside the
-  /// strip, rows are identical in place.
-  fn head_at(&self, y: usize) -> bool {
-    y.checked_sub(self.top)
-      .and_then(|index| self.head.get(index))
-      .is_none_or(|&accounted| accounted)
-  }
-
-  fn base_at(&self, y: usize) -> bool {
-    y.checked_sub(self.top)
-      .and_then(|index| self.base.get(index))
-      .is_none_or(|&accounted| accounted)
+  /// Whether the head row and the base row at canvas row `y` are accounted
+  /// for. Outside the strip, rows are identical in place.
+  fn at(&self, y: usize) -> (bool, bool) {
+    match y
+      .checked_sub(self.top)
+      .filter(|&index| index < self.head.len())
+    {
+      Some(index) => (self.head[index], self.base[index]),
+      None => (true, true),
+    }
   }
 }
 
@@ -1003,7 +1007,6 @@ fn analyse(input: &Input, x0: usize, x1: usize, rows: (usize, usize)) -> Option<
 
   let mut base_used = vec![false; rows];
   let mut segments: Vec<ShiftSegment> = Vec::new();
-  let mut reach = 0;
   for (state, start, end) in blocks(&assigned) {
     if state == none {
       continue;
@@ -1021,7 +1024,6 @@ fn analyse(input: &Input, x0: usize, x1: usize, rows: (usize, usize)) -> Option<
       if after < rows && !strip.explains(end - 1, offset, false) {
         base_used[after] = true;
       }
-      reach = reach.max(offset.dy.unsigned_abs());
       segments.push(ShiftSegment {
         x: x0 as u32,
         width: (x1 - x0 + 1) as u32,
@@ -1033,41 +1035,26 @@ fn analyse(input: &Input, x0: usize, x1: usize, rows: (usize, usize)) -> Option<
     }
   }
 
-  let max_delta = input.max_delta;
-  let mut head: Vec<bool> = (0..rows)
-    .map(|row| strip.head[row].void || assigned[row] != none)
-    .collect();
-  stretch(&mut head, |row, other| {
-    !strip.head[row].void
-      && !strip.head[other].void
-      && matches(
-        strip.head_row(row),
-        strip.head_row(other),
-        max_delta,
-        |_, _| false,
-      )
-  });
-  let mut base: Vec<bool> = (0..rows)
-    .map(|row| strip.base[row].void || base_used[row])
-    .collect();
-  stretch(&mut base, |row, other| {
-    !strip.base[row].void
-      && !strip.base[other].void
-      && matches(
-        strip.base_row(row),
-        strip.base_row(other),
-        max_delta,
-        |_, _| false,
-      )
-  });
-
+  let accounted = |signatures: &[Signature], view: View, used: Vec<bool>| {
+    let mut accounted: Vec<bool> = used
+      .into_iter()
+      .zip(signatures)
+      .map(|(used, signature)| used || signature.void)
+      .collect();
+    let row = |index: usize| view.row(top + index, x0, x1);
+    stretch(&mut accounted, |index, other| {
+      !signatures[other].void && matches(row(index), row(other), input.max_delta, |_, _| false)
+    });
+    accounted
+  };
   Some(Analysis {
-    x0,
-    x1,
     top,
-    head,
-    base,
-    reach,
+    head: accounted(
+      &strip.head,
+      input.head,
+      assigned.iter().map(|&state| state != none).collect(),
+    ),
+    base: accounted(&strip.base, input.base, base_used),
     segments,
   })
 }
@@ -1125,26 +1112,15 @@ fn columns(input: &Input, x0: usize, x1: usize, first: usize, last: usize) -> Ve
   starts.zip(ends).collect()
 }
 
-/// One column of a cluster of rows the strip leaves unexplained, analysed
-/// on its own.
-struct Column {
-  x0: usize,
-  x1: usize,
-  analysis: Option<Analysis>,
-}
-
-/// Rows `first..=last` of a strip, where it falls into columns.
-struct Split {
-  first: usize,
-  last: usize,
-  columns: Vec<Column>,
-}
-
 fn analyse_strip(input: &Input, x0: usize, x1: usize, total: &mut ShiftReport) {
   let Some(strip) = analyse(input, x0, x1, input.raw_rows) else {
     return;
   };
-  let mut report = ShiftReport::default();
+  // Where nothing moved across the strip, nothing is looked for in its
+  // columns either.
+  if strip.segments.is_empty() {
+    return;
+  }
   let pixels = |y: usize, x0: usize, x1: usize| input.mask.count_in_row(y, x0, x1);
 
   // Where the strip leaves pixels of the mask unexplained, its columns may
@@ -1154,88 +1130,66 @@ fn analyse_strip(input: &Input, x0: usize, x1: usize, total: &mut ShiftReport) {
   // looked at on its own, around the rows left unexplained. What a column
   // finds adds to what the strip found: both hold, pixel for pixel.
   let unexplained: Vec<usize> = (strip.top..=strip.bottom())
-    .filter(|&y| !(strip.head_at(y) && strip.base_at(y)) && pixels(y, x0, x1) > 0)
+    .filter(|&y| strip.at(y) != (true, true) && pixels(y, x0, x1) > 0)
     .collect();
-  // Where nothing moved across the strip, nothing is looked for in its
-  // columns either.
-  let moved = strip.reach > 0 || strip.segments.iter().any(|segment| segment.dx != 0);
-  let splits: Vec<Split> = clusters(&unexplained, CLUSTER_GAP)
+  let splits: Vec<_> = clusters(&unexplained, CLUSTER_GAP)
     .into_iter()
-    .filter(|_| moved)
-    .filter_map(|(first, last)| {
-      let columns = columns(input, x0, x1, first, last);
-      if columns.len() < 2 {
-        return None;
-      }
-      // Far enough around the rows to find where their content came from:
-      // as far as the strip saw anything move.
-      let margin = strip.reach + 2;
-      let window = (
-        first.saturating_sub(margin).max(strip.top),
-        (last + margin).min(strip.bottom()),
-      );
-      let columns = columns
-        .into_iter()
-        .filter(|&(x0, x1)| (first..=last).any(|y| pixels(y, x0, x1) > 0))
-        .map(|(x0, x1)| Column {
-          x0,
-          x1,
-          analysis: analyse(input, x0, x1, window),
-        })
-        .collect();
-      Some(Split {
-        first,
-        last,
-        columns,
-      })
-    })
+    .map(|(first, last)| (first, last, columns(input, x0, x1, first, last)))
+    .filter(|(_, _, columns)| columns.len() > 1)
     .collect();
+  // Far enough around the rows to find where their content came from: as
+  // far as the strip saw anything move.
+  let margin = strip
+    .segments
+    .iter()
+    .map(|segment| segment.dy().unsigned_abs() as usize)
+    .max()
+    .unwrap_or(0)
+    + 2;
 
-  let split_at = |y: usize| {
-    splits
-      .iter()
-      .any(|split| (split.first..=split.last).contains(&y))
-  };
-  let outside: Vec<(usize, usize)> = runs(strip.bottom() + 1 - strip.top, |row| {
-    !split_at(strip.top + row)
-  })
-  .map(|(start, end)| (strip.top + start, strip.top + end))
-  .collect();
-
-  for segment in &strip.segments {
-    for &(start, end) in &outside {
-      report.segments.extend(clip(segment, start, end));
-    }
-  }
-  for &(start, end) in &outside {
+  let mut report = ShiftReport::default();
+  let mut emit = |columns: (usize, usize),
+                  rows: (usize, usize),
+                  segments: &[ShiftSegment],
+                  found: Option<&Analysis>| {
+    report.segments.extend(
+      segments
+        .iter()
+        .filter_map(|segment| clip(segment, rows.0, rows.1)),
+    );
     outline(
       input,
-      (strip.x0, strip.x1),
-      (start, end),
-      |y| strip.head_at(y),
-      |y| strip.base_at(y),
+      columns,
+      rows,
+      |y| {
+        let (head, base) = strip.at(y);
+        let (also_head, also_base) = found.map_or((false, false), |found| found.at(y));
+        (head || also_head, base || also_base)
+      },
       &mut report,
     );
-  }
-  for split in &splits {
-    for column in &split.columns {
-      let found = column.analysis.as_ref();
-      for segment in found.iter().flat_map(|found| &found.segments) {
-        report
-          .segments
-          .extend(clip(segment, split.first, split.last + 1));
+  };
+  let mut start = strip.top;
+  for (first, last, columns) in splits {
+    emit((x0, x1), (start, first), &strip.segments, None);
+    let window = (
+      first.saturating_sub(margin).max(strip.top),
+      (last + margin).min(strip.bottom()),
+    );
+    for (x0, x1) in columns {
+      if (first..=last).all(|y| pixels(y, x0, x1) == 0) {
+        continue;
       }
-      outline(
-        input,
-        (column.x0, column.x1),
-        (split.first, split.last + 1),
-        |y| strip.head_at(y) || found.is_some_and(|found| found.head_at(y)),
-        |y| strip.base_at(y) || found.is_some_and(|found| found.base_at(y)),
-        &mut report,
-      );
+      let found = analyse(input, x0, x1, window);
+      let segments = found.as_ref().map_or(&[][..], |found| &found.segments[..]);
+      emit((x0, x1), (first, last + 1), segments, found.as_ref());
     }
+    start = last + 1;
   }
-  // A strip where nothing moved has nothing to say.
+  emit((x0, x1), (start, strip.bottom() + 1), &strip.segments, None);
+
+  // A strip whose moves all fall where its columns found none has nothing
+  // to say.
   if !report.segments.is_empty() {
     total.segments.append(&mut report.segments);
     total.inserted.append(&mut report.inserted);
@@ -1264,8 +1218,7 @@ fn outline(
   input: &Input,
   (x0, x1): (usize, usize),
   (start, end): (usize, usize),
-  head: impl Fn(usize) -> bool,
-  base: impl Fn(usize) -> bool,
+  accounted: impl Fn(usize) -> (bool, bool),
   report: &mut ShiftReport,
 ) {
   let band = |from: usize, to: usize| Rect {
@@ -1278,13 +1231,14 @@ fn outline(
   let pixels: Vec<u64> = (start..end)
     .map(|y| input.mask.count_in_row(y, x0, x1))
     .collect();
+  let (head, base): (Vec<bool>, Vec<bool>) = (start..end).map(accounted).unzip();
   report
     .inserted
-    .extend(runs(rows, |row| !head(start + row)).map(|(from, to)| band(from, to)));
+    .extend(runs(rows, |row| !head[row]).map(|(from, to)| band(from, to)));
   report
     .removed
-    .extend(runs(rows, |row| !base(start + row)).map(|(from, to)| band(from, to)));
-  let hidden = |row: usize| pixels[row] == 0 || (head(start + row) && base(start + row));
+    .extend(runs(rows, |row| !base[row]).map(|(from, to)| band(from, to)));
+  let hidden = |row: usize| pixels[row] == 0 || (head[row] && base[row]);
   for (from, to) in runs(rows, hidden) {
     // Rows without a pixel to hide need no hiding: trimmed off the ends.
     let Some(first) = (from..to).find(|&row| pixels[row] > 0) else {
