@@ -262,7 +262,7 @@ describe("diff", () => {
     const result = await diff(await page(null), await page(54));
     expect(result.shift).toBeDefined();
     expect(result.shift!.segments).toEqual([
-      { x: 0, width: 160, baseY: 54, headY: 78, height: 162, dy: 24 },
+      { x: 0, width: 160, baseY: 54, headY: 78, height: 162, dy: 24, dx: 0 },
     ]);
     expect(result.shift!.inserted).toEqual([
       { x: 0, y: 54, width: 160, height: 24 },
@@ -270,6 +270,10 @@ describe("diff", () => {
     // The screenshot kept its height, so the last 24 rows fell off the bottom.
     expect(result.shift!.removed).toEqual([
       { x: 0, y: 216, width: 160, height: 24 },
+    ]);
+    // What is left of the mask is the banner, and what fell off the bottom.
+    expect(result.shift!.hidden).toEqual([
+      { x: 0, y: 78, width: 160, height: 138 },
     ]);
     expect(result.shift!.shiftedPixels).toBeGreaterThan(
       result.diffPixels * 0.6,

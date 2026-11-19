@@ -166,7 +166,7 @@ pub struct JsMask {
   pub bounds: JsRect,
 }
 
-/// A block of rows found at another height in the head image.
+/// A block of rows found elsewhere in the head image.
 #[napi(object, js_name = "ShiftSegment")]
 pub struct JsShiftSegment {
   pub x: u32,
@@ -176,6 +176,9 @@ pub struct JsShiftSegment {
   pub height: u32,
   /// `headY - baseY`: positive when the block moved down.
   pub dy: i32,
+  /// Columns the block moved by, positive when it moved right: in the base
+  /// image it was at `x - dx`.
+  pub dx: i32,
 }
 
 #[napi(object, js_name = "Shift")]
@@ -186,7 +189,11 @@ pub struct JsShift {
   pub inserted: Vec<JsRect>,
   /// Rows of the base image with no counterpart in the head image.
   pub removed: Vec<JsRect>,
-  /// Pixels of the mask that differ only because content moved.
+  /// Areas of the mask that differ only because content moved, none
+  /// overlapping another: leave them out of the mask and what is left is
+  /// what changed.
+  pub hidden: Vec<JsRect>,
+  /// Pixels of the mask in `hidden`.
   pub shifted_pixels: f64,
 }
 
@@ -272,10 +279,12 @@ fn into_js(outcome: Outcome) -> JsDiffResult {
           head_y: segment.head_y,
           height: segment.height,
           dy: segment.dy() as i32,
+          dx: segment.dx as i32,
         })
         .collect(),
       inserted: shift.inserted.into_iter().map(JsRect::from).collect(),
       removed: shift.removed.into_iter().map(JsRect::from).collect(),
+      hidden: shift.hidden.into_iter().map(JsRect::from).collect(),
       shifted_pixels: shift.shifted_pixels as f64,
     }),
   }

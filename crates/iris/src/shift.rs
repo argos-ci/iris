@@ -31,14 +31,28 @@
 //! 4. Each row gets one explanation — in place, moved by one of the
 //!    distances, or none — so as to leave the fewest rows unexplained in the
 //!    fewest blocks.
+//! 5. Plain rows next to explained ones that are more of the same, the
+//!    background of a card that grew or shrank, are explained too.
 //!
-//! Horizontal movement is not looked for.
+//! Distances are taken sideways as well as down: a row is hashed a second
+//! time without the background on either side, so content that slid across
+//! hashes the same, and where that content starts says by how much.
+//!
+//! Where a strip leaves pixels unexplained, it is cut down the gutters of
+//! the head image around them and each column is looked at on its own: in a
+//! row of cards, the one that grew moves its own content, not that of the
+//! cards beside it. A row across them matches nowhere, its parts do.
+//!
+//! The report says which areas of the mask hold only movement: the rows of a
+//! strip, or of a column, where both what is in the head image and what was
+//! in the base image are accounted for.
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
 
 use crate::antialias::Noise;
 use crate::delta::within;
+use crate::image::Image;
 use crate::mask::{Mask, Rect};
 use crate::view::{Row, View, CHUNK};
 
@@ -57,8 +71,15 @@ const VOTE: u64 = 720_720;
 /// Times the rows of a strip are given out again after a block came out
 /// with too little evidence, at most.
 const MAX_SOLVES: usize = 8;
+/// Explained rows between two unexplained ones that still leave them in one
+/// cluster, to be split into columns together.
+const CLUSTER_GAP: usize = 32;
+/// Widest line down a gutter that is still part of it: a border.
+const BORDER: usize = 2;
+/// Pixels the noise detectors read on either side of the one they judge.
+const WINDOW: usize = 3;
 
-/// A block of rows found at another height in the head image.
+/// A block of rows found elsewhere in the head image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShiftSegment {
   /// Column strip the block belongs to.
@@ -68,6 +89,9 @@ pub struct ShiftSegment {
   pub base_y: u32,
   pub head_y: u32,
   pub height: u32,
+  /// Horizontal displacement, positive when the block moved right: in the
+  /// base image, it was `dx` columns left of `x`.
+  pub dx: i64,
 }
 
 impl ShiftSegment {
@@ -88,9 +112,13 @@ pub struct ShiftReport {
   /// Base rows, in strips that hold a shift, with no counterpart in head:
   /// what was removed or changed.
   pub removed: Vec<Rect>,
-  /// Pixels of the mask that differ only because content moved: both what
-  /// used to be there and what is there now are found elsewhere, near
-  /// enough that the mask would not tell them apart.
+  /// Areas of the mask that differ only because content moved, top to
+  /// bottom, none overlapping another: leave them out of the mask and what
+  /// is left is what changed.
+  pub hidden: Vec<Rect>,
+  /// Pixels of the mask in `hidden`: both what used to be there and what is
+  /// there now are found elsewhere, near enough that the mask would not tell
+  /// them apart.
   pub shifted_pixels: u64,
 }
 
@@ -105,6 +133,10 @@ pub(crate) struct Input<'a> {
   /// Largest colour delta the mask leaves out: pixels this close are the
   /// same content.
   pub max_delta: i64,
+  /// Largest colour delta the least sensitive tier leaves out: on an edge of
+  /// content that moved sideways, pixels this close are the same edge drawn
+  /// at another fraction of a column.
+  pub edge_delta: i64,
   /// The detector that left rendering noise out of the mask.
   pub noise: Noise,
   pub min_rows: usize,
@@ -121,19 +153,22 @@ pub(crate) fn detect(input: &Input) -> Option<ShiftReport> {
   report
     .segments
     .sort_by_key(|segment| (segment.head_y, segment.x));
+  for rects in [
+    &mut report.inserted,
+    &mut report.removed,
+    &mut report.hidden,
+  ] {
+    rects.sort_by_key(|rect| (rect.y, rect.x));
+  }
   Some(report)
 }
 
 /// Group the differing columns into strips, as inclusive ranges.
 fn strips(columns: &[u64], width: usize) -> Vec<(usize, usize)> {
-  let is_set = |x: usize| columns[x / 64] & (1 << (x % 64)) != 0;
-  let mut strips: Vec<(usize, usize)> = Vec::new();
-  for x in (0..width).filter(|&x| is_set(x)) {
-    match strips.last_mut() {
-      Some((_, end)) if x - *end <= STRIP_GAP => *end = x,
-      _ => strips.push((x, x)),
-    }
-  }
+  let set: Vec<usize> = (0..width)
+    .filter(|&x| columns[x / 64] & (1 << (x % 64)) != 0)
+    .collect();
+  let strips = clusters(&set, STRIP_GAP - 1);
   if strips.len() > MAX_STRIPS {
     let (first, last) = (strips[0].0, strips[strips.len() - 1].1);
     return vec![(first, last)];
@@ -145,6 +180,11 @@ fn strips(columns: &[u64], width: usize) -> Vec<(usize, usize)> {
 #[derive(Clone, Copy)]
 struct Signature {
   hash: u64,
+  /// Hash of the row without the background on either side of it, and the
+  /// column where what is left starts: content that moved sideways hashes
+  /// the same, and the two starts say how far it went.
+  content: u64,
+  left: usize,
   /// One colour across the strip. Flat rows are everywhere, so they can
   /// travel with a block but never anchor one.
   flat: bool,
@@ -152,36 +192,65 @@ struct Signature {
   void: bool,
 }
 
-fn signature(row: Row, void: bool) -> Signature {
+/// Hash `pixels`, starting from `seed`.
+fn mix(seed: u64, mut pixels: impl Iterator<Item = u32>) -> u64 {
   const MULTIPLIER: u64 = 0x517cc1b727220a95;
-  let length = row.pixels.len() + row.zeros;
-  let mut pixels = row.iter();
-  let first = row.pixels.first().copied().unwrap_or(0);
-  let mut varies = 0u32;
-  let mut hash = 0x9e3779b97f4a7c15u64 ^ length as u64;
+  let mut hash = 0x9e3779b97f4a7c15u64 ^ seed;
   // Two pixels per multiplication, paired the same way wherever the image
   // ends, so equal rows hash equal.
   while let Some(left) = pixels.next() {
     let word = match pixels.next() {
-      Some(right) => {
-        varies |= (left ^ first) | (right ^ first);
-        left as u64 | (right as u64) << 32
-      }
-      None => {
-        varies |= left ^ first;
-        left as u64
-      }
+      Some(right) => left as u64 | (right as u64) << 32,
+      None => left as u64,
     };
     hash = (hash.rotate_left(5) ^ word).wrapping_mul(MULTIPLIER);
   }
   hash ^= hash >> 32;
   hash = hash.wrapping_mul(0xd6e8feb86659fd93);
-  hash ^= hash >> 32;
+  hash ^ hash >> 32
+}
+
+fn signature(row: Row, void: bool) -> Signature {
+  let length = row.pixels.len() + row.zeros;
+  let (first, last) = (row.get(0), row.get(length - 1));
+  let left = row
+    .iter()
+    .position(|pixel| pixel != first)
+    .unwrap_or(length);
+  // Past the image, pixels are transparent, and so is the last one: the
+  // padding goes with the rest of the background.
+  let right = match left {
+    left if left == length => left,
+    _ => row
+      .pixels
+      .iter()
+      .rposition(|&pixel| pixel != last)
+      .map_or(0, |x| x + 1),
+  };
+  let pixels = row.iter().skip(left).take(right.saturating_sub(left));
+  let content = mix(first as u64 | (last as u64) << 32, pixels);
   Signature {
-    hash,
-    flat: varies == 0,
+    // The same content between the same backgrounds, at the same place:
+    // the same row.
+    hash: mix(
+      content,
+      [left, right, length].map(|at| at as u32).into_iter(),
+    ),
+    content,
+    left,
+    flat: left == length,
     void,
   }
+}
+
+/// Whether every channel of `pixel` lies between those of `a` and `b`, give
+/// or take a level.
+fn between(pixel: u32, a: u32, b: u32) -> bool {
+  let (pixel, a, b) = (pixel.to_ne_bytes(), a.to_ne_bytes(), b.to_ne_bytes());
+  (0..4).all(|channel| {
+    let (low, high) = (a[channel].min(b[channel]), a[channel].max(b[channel]));
+    (low.saturating_sub(1)..=high.saturating_add(1)).contains(&pixel[channel])
+  })
 }
 
 /// Up to `MAX_CANDIDATES` entries of a sorted list, around `target`.
@@ -232,9 +301,16 @@ fn aligned<'a>(base: View<'a>, head: View<'a>, offset: isize) -> (View<'a>, View
   (base.crop(height), head.crop(height))
 }
 
+/// How far content moved: `dy` rows down and `dx` columns right.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+struct Offset {
+  dy: isize,
+  dx: isize,
+}
+
 /// A distance content was seen to move by, and the head rows that saw it.
 struct Displacement {
-  offset: isize,
+  offset: Offset,
   voters: Vec<usize>,
 }
 
@@ -331,39 +407,52 @@ impl<'a> Strip<'_, 'a> {
       .collect()
   }
 
-  /// Distances content was seen to move by: a telling head row equal to
-  /// base rows elsewhere votes for the distances to them, one vote shared
-  /// between all the places it may have come from. The distances with
-  /// `min_rows` votes, most voted first, at most `MAX_DISPLACEMENTS` of them.
+  /// Distances content was seen to move by: a telling head row whose
+  /// content is that of base rows elsewhere votes for the distances to them,
+  /// down and sideways, one vote shared between all the places it may have
+  /// come from. The distances with `min_rows` votes, most voted first, at
+  /// most `MAX_DISPLACEMENTS` of them.
   fn displacements(&self, telling: &[bool]) -> Vec<Displacement> {
     let mut positions: HashMap<u64, Vec<usize>> = HashMap::new();
     for (index, row) in self.base.iter().enumerate() {
       if !row.flat && !row.void {
-        positions.entry(row.hash).or_default().push(index);
+        positions.entry(row.content).or_default().push(index);
       }
     }
     let sources = |index: usize| -> &[usize] {
-      match positions.get(&self.head[index].hash) {
+      match positions.get(&self.head[index].content) {
         Some(found) if telling[index] => nearest(found, index),
         _ => &[],
       }
     };
-    let offset = |index: usize, source: usize| index as isize - source as isize;
+    let offset = |index: usize, source: usize| Offset {
+      dy: index as isize - source as isize,
+      dx: self.head[index].left as isize - self.base[source].left as isize,
+    };
 
-    let mut votes: HashMap<isize, u64> = HashMap::new();
+    let mut votes: HashMap<Offset, u64> = HashMap::new();
     for index in 0..self.rows() {
       let sources = sources(index);
       for &source in sources {
         *votes.entry(offset(index, source)).or_default() += VOTE / sources.len() as u64;
       }
     }
-    let mut kept: Vec<(isize, u64)> = votes
+    let mut kept: Vec<(Offset, u64)> = votes
       .into_iter()
       .filter(|&(_, votes)| votes >= self.input.min_rows as u64 * VOTE)
       .collect();
-    // Between equal votes, the shorter move first, then the upward one: any
-    // fixed order will do, as long as it is not the map's.
-    kept.sort_by_key(|&(offset, votes)| (Reverse(votes), offset.abs(), offset));
+    // Between equal votes, the shorter move first, then the upward one, then
+    // the one to the left: any fixed order will do, as long as it is not the
+    // map's.
+    kept.sort_by_key(|&(offset, votes)| {
+      (
+        Reverse(votes),
+        offset.dy.abs(),
+        offset.dy,
+        offset.dx.abs(),
+        offset.dx,
+      )
+    });
     kept.truncate(MAX_DISPLACEMENTS);
 
     let mut found: Vec<Displacement> = kept
@@ -395,24 +484,29 @@ impl<'a> Strip<'_, 'a> {
   /// gradients dithered and its edges anti-aliased afresh. A pixel within
   /// the mask's threshold, or noise to the detector that made the mask, is
   /// the same content.
-  fn explains(&self, index: usize, offset: isize, slack: bool) -> bool {
+  fn explains(&self, index: usize, offset: Offset, slack: bool) -> bool {
     let input = self.input;
     let rows = self.rows();
+    let (Some(source), false) = (index.checked_add_signed(-offset.dy), self.head[index].void)
+    else {
+      return false;
+    };
+    if source >= rows || self.base[source].void {
+      return false;
+    }
+    if offset.dx != 0 {
+      return self.explains_across(index, source, offset.dx, slack);
+    }
     let base_row =
       |source: usize| (source < rows && !self.base[source].void).then(|| self.base_row(source));
-    let (Some(source), false) = (index.checked_add_signed(-offset), self.head[index].void) else {
-      return false;
-    };
-    let Some(before) = base_row(source) else {
-      return false;
-    };
+    let before = self.base_row(source);
     let now = self.head_row(index);
     if self.head[index].hash == self.base[source].hash && now == before {
       return true;
     }
     let around = |source: Option<usize>| source.filter(|_| slack).and_then(base_row);
     let (above, below) = (around(source.checked_sub(1)), around(Some(source + 1)));
-    let (base, head) = aligned(input.base, input.head, offset);
+    let (base, head) = aligned(input.base, input.head, offset.dy);
     let y = self.top + index.min(source);
     matches(now, before, input.max_delta, |x, pixel| {
       let near = |row: Row| within(row.get(x), pixel, input.max_delta);
@@ -420,6 +514,109 @@ impl<'a> Strip<'_, 'a> {
         || below.is_some_and(near)
         || input.noise.at(&base, &head, self.x0 + x, y)
     })
+  }
+
+  /// `explains`, for a base row `source` whose content moved `dx` columns
+  /// right as well: the pixels are read where they came from. Content that
+  /// moves sideways lands at fractional columns as it does at fractional
+  /// rows, so with `slack` a pixel may also match the ones just left and
+  /// right of where it came from, and the noise detector judges what is
+  /// left on windows of both images lined up for the move.
+  fn explains_across(&self, index: usize, source: usize, dx: isize, slack: bool) -> bool {
+    let input = self.input;
+    let rows = self.rows();
+    // One column more on either side, for the slack.
+    let shifted = |source: usize| -> Vec<u32> {
+      self
+        .padded(input.base, Some(self.top + source), dx, 1)
+        .collect()
+    };
+    let before = shifted(source);
+    let around = |source: Option<usize>| {
+      source
+        .filter(|&source| slack && source < rows && !self.base[source].void)
+        .map(shifted)
+    };
+    let (above, below) = (around(source.checked_sub(1)), around(Some(source + 1)));
+    let max_delta = input.max_delta;
+    // An edge drawn at a fractional column is drawn anew: its pixels blend
+    // the two on either side of it in proportions of their own, and a glyph
+    // rendered at another phase shifts its ink by a few levels. With slack,
+    // a pixel between two neighbours of the one it came from, channel by
+    // channel, is that edge, and so is one the least sensitive tier would
+    // take for one of them. A flat area has no two sides: a change of colour
+    // there still shows.
+    let edge_delta = input.edge_delta.max(max_delta);
+    let near = |row: &[u32], x: usize, pixel: u32| {
+      if !slack {
+        return within(row[x + 1], pixel, max_delta);
+      }
+      let around = &row[x..x + 3];
+      let delta = if around.iter().all(|&other| other == around[0]) {
+        max_delta
+      } else {
+        edge_delta
+      };
+      around.iter().any(|&other| within(other, pixel, delta))
+        || between(pixel, around[0], around[1])
+        || between(pixel, around[1], around[2])
+    };
+    let now = self.head_row(index);
+    let before_row = Row {
+      pixels: &before[1..before.len() - 1],
+      zeros: 0,
+    };
+    let close = |x: usize, pixel: u32| {
+      [Some(&before), above.as_ref(), below.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(|row| near(row, x, pixel))
+    };
+    // The noise detectors read the pixels around the one they judge: they
+    // get both images, lined up for the move, around the two rows.
+    let mut windows: Option<(Image, Image)> = None;
+    matches(now, before_row, max_delta, |x, pixel| {
+      close(x, pixel) || {
+        let (base, head) = windows.get_or_insert_with(|| {
+          (
+            self.window(input.base, self.top + source, dx),
+            self.window(input.head, self.top + index, 0),
+          )
+        });
+        let (width, height) = (base.width() as usize, base.height() as usize);
+        let (base, head) = (
+          View::new(base, width, height),
+          View::new(head, width, height),
+        );
+        input.noise.at(&base, &head, x + WINDOW, WINDOW)
+      }
+    })
+  }
+
+  /// Canvas row `y` of `view` over the strip's columns and `pad` more on
+  /// either side, read `dx` columns left: transparent off the canvas.
+  fn padded(
+    &self,
+    view: View<'a>,
+    y: Option<usize>,
+    dx: isize,
+    pad: usize,
+  ) -> impl Iterator<Item = u32> + use<'_, 'a> {
+    (0..self.x1 - self.x0 + 1 + 2 * pad).map(move |column| {
+      match ((self.x0 + column).checked_add_signed(-dx - pad as isize), y) {
+        (Some(x), Some(y)) => view.at(x, y),
+        _ => 0,
+      }
+    })
+  }
+
+  /// Rows `y - WINDOW..=y + WINDOW` of `view`, padded by `WINDOW`.
+  fn window(&self, view: View<'a>, y: usize, dx: isize) -> Image {
+    let width = self.x1 - self.x0 + 1 + 2 * WINDOW;
+    let pixels = (0..=2 * WINDOW)
+      .flat_map(|row| self.padded(view, (y + row).checked_sub(WINDOW), dx, WINDOW))
+      .collect();
+    Image::new(width as u32, (2 * WINDOW + 1) as u32, pixels).expect("pixels for the window")
   }
 
   /// Which explanations fit each head row, as a bitset: bit 0 when the row
@@ -666,23 +863,84 @@ fn blocks(values: &[usize]) -> impl Iterator<Item = (usize, usize, usize)> + '_ 
   })
 }
 
-/// The first and last rows of the canvas that differ within columns
-/// `x0..=x1`. Everything outside them is identical in place, so it can
-/// neither have moved nor hold a pixel to explain.
-fn differing_rows(input: &Input, x0: usize, x1: usize) -> Option<(usize, usize)> {
-  let (first, last) = input.raw_rows;
+/// The first and last rows of `rows` that differ within columns `x0..=x1`.
+/// Everything outside them is identical in place, so it can neither have
+/// moved nor hold a pixel to explain.
+fn differing_rows(
+  input: &Input,
+  x0: usize,
+  x1: usize,
+  (first, last): (usize, usize),
+) -> Option<(usize, usize)> {
   let mut differing =
     (first..=last).filter(|&y| input.base.row(y, x0, x1) != input.head.row(y, x0, x1));
   let top = differing.next()?;
   Some((top, differing.next_back().unwrap_or(top)))
 }
 
-fn analyse_strip<'a>(input: &Input<'a>, x0: usize, x1: usize, report: &mut ShiftReport) {
-  let Some((top, bottom)) = differing_rows(input, x0, x1) else {
-    return;
-  };
+/// The rows of a strip, told apart: what each head row is, and whether
+/// each base row went anywhere.
+struct Analysis {
+  /// Canvas row of index 0.
+  top: usize,
+  /// Per row, whether the head row is accounted for: in place, moved
+  /// there, padding, or more of the plain rows next to one that is.
+  head: Vec<bool>,
+  /// Per row, whether the base row is: still there, moved elsewhere,
+  /// padding, or more of the plain rows next to one that is.
+  base: Vec<bool>,
+  segments: Vec<ShiftSegment>,
+}
+
+impl Analysis {
+  fn bottom(&self) -> usize {
+    self.top + self.head.len() - 1
+  }
+
+  /// Whether the head row and the base row at canvas row `y` are accounted
+  /// for. Outside the strip, rows are identical in place.
+  fn at(&self, y: usize) -> (bool, bool) {
+    match y
+      .checked_sub(self.top)
+      .filter(|&index| index < self.head.len())
+    {
+      Some(index) => (self.head[index], self.base[index]),
+      None => (true, true),
+    }
+  }
+}
+
+/// Mark, in `accounted`, the rows that are more of the row next to them,
+/// when that row is accounted for: space that grew or shrank.
+///
+/// A card that grows taller stretches its background, and the page below it
+/// moves: the new rows of background have no counterpart in the base image,
+/// and neither have the old ones a moved block covers now. Both are more of
+/// what is still there. A change is not: a new line of text, a bar of
+/// another colour, differs from the rows around it, and stops the run.
+fn stretch(accounted: &mut [bool], alike: impl Fn(usize, usize) -> bool) {
+  let rows = accounted.len();
+  let gaps: Vec<(usize, usize)> = runs(rows, |row| !accounted[row]).collect();
+  for (start, end) in gaps {
+    let mut row = start;
+    while row > 0 && row < end && alike(row, row - 1) {
+      accounted[row] = true;
+      row += 1;
+    }
+    let mut row = end;
+    while row < rows && row > start && !accounted[row - 1] && alike(row - 1, row) {
+      accounted[row - 1] = true;
+      row -= 1;
+    }
+  }
+}
+
+/// Explain the rows `rows` of columns `x0..=x1` by movement, as far as they
+/// go. `None` when they hold fewer than `min_rows` differing rows.
+fn analyse(input: &Input, x0: usize, x1: usize, rows: (usize, usize)) -> Option<Analysis> {
+  let (top, bottom) = differing_rows(input, x0, x1, rows)?;
   if bottom - top + 1 < input.min_rows {
-    return;
+    return None;
   }
   // And the unchanged row on either side, for content that moved by a row
   // and a fraction to have the row next to where it came from at hand.
@@ -692,7 +950,7 @@ fn analyse_strip<'a>(input: &Input<'a>, x0: usize, x1: usize, report: &mut Shift
   );
   let rows = bottom - top + 1;
 
-  let signatures = |view: &View<'a>| -> Vec<Signature> {
+  let signatures = |view: &View| -> Vec<Signature> {
     let (image_width, image_height) = view.image_size();
     (top..=bottom)
       .map(|y| signature(view.row(y, x0, x1), y >= image_height || x0 >= image_width))
@@ -713,33 +971,39 @@ fn analyse_strip<'a>(input: &Input<'a>, x0: usize, x1: usize, report: &mut Shift
   let in_place = strip.in_place();
   let telling = strip.telling(&in_place);
   let found = strip.displacements(&telling);
-  if found.is_empty() {
-    return;
-  }
-  let offsets: Vec<isize> = std::iter::once(0)
+  let offsets: Vec<Offset> = std::iter::once(Offset::default())
     .chain(found.iter().map(|found| found.offset))
     .collect();
-  let mut explained = strip.explain(&in_place, &found);
-  let evidence = Evidence::new(&telling);
-  // A telling row identical to a base row that is still where it was is a
-  // copy of it. Plain rows fit anywhere, so their sources prove nothing.
-  let copies = |row: usize, source: usize| {
-    telling[row] && in_place[source] && strip.head[row].hash == strip.base[source].hash
-  };
-  keep_evidenced(&mut explained, &evidence, &offsets, input.min_rows, copies);
-
-  // One move per stretch of rows: a row that several moves explain — a flat
-  // one, one of a repeated pattern, one of a block that moved by 23 rows
-  // next to one that moved by 24 — stays with its neighbours. A block is
-  // worth starting for `min_rows` rows.
+  let rises: Vec<isize> = offsets.iter().map(|offset| offset.dy).collect();
   let none = offsets.len();
-  let assigned = solve(
-    &mut explained,
-    &evidence,
-    |row| strip.head[row].void,
-    offsets.len(),
-    input.min_rows,
-  );
+  let assigned = if found.is_empty() {
+    in_place
+      .iter()
+      .map(|&stayed| if stayed { 0 } else { none })
+      .collect()
+  } else {
+    let mut explained = strip.explain(&in_place, &found);
+    let evidence = Evidence::new(&telling);
+    // A telling row with the content of a base row that is still where it
+    // was is a copy of it. Plain rows fit anywhere, so their sources prove
+    // nothing.
+    let copies = |row: usize, source: usize| {
+      telling[row] && in_place[source] && strip.head[row].content == strip.base[source].content
+    };
+    keep_evidenced(&mut explained, &evidence, &rises, input.min_rows, copies);
+
+    // One move per stretch of rows: a row that several moves explain — a
+    // flat one, one of a repeated pattern, one of a block that moved by 23
+    // rows next to one that moved by 24 — stays with its neighbours. A block
+    // is worth starting for `min_rows` rows.
+    solve(
+      &mut explained,
+      &evidence,
+      |row| strip.head[row].void,
+      offsets.len(),
+      input.min_rows,
+    )
+  };
 
   let mut base_used = vec![false; rows];
   let mut segments: Vec<ShiftSegment> = Vec::new();
@@ -748,9 +1012,9 @@ fn analyse_strip<'a>(input: &Input<'a>, x0: usize, x1: usize, report: &mut Shift
       continue;
     }
     let offset = offsets[state];
-    let source = (start as isize - offset) as usize;
+    let source = (start as isize - offset.dy) as usize;
     base_used[source..source + end - start].fill(true);
-    if offset != 0 {
+    if offset != Offset::default() {
       // A block's first row may have come from the row above its source,
       // and its last from the row below: those rows are not gone either.
       if source > 0 && !strip.explains(start, offset, false) {
@@ -766,33 +1030,227 @@ fn analyse_strip<'a>(input: &Input<'a>, x0: usize, x1: usize, report: &mut Shift
         base_y: (top + source) as u32,
         head_y: (top + start) as u32,
         height: (end - start) as u32,
+        dx: offset.dx as i64,
       });
     }
   }
-  if segments.is_empty() {
+
+  let accounted = |signatures: &[Signature], view: View, used: Vec<bool>| {
+    let mut accounted: Vec<bool> = used
+      .into_iter()
+      .zip(signatures)
+      .map(|(used, signature)| used || signature.void)
+      .collect();
+    let row = |index: usize| view.row(top + index, x0, x1);
+    stretch(&mut accounted, |index, other| {
+      !signatures[other].void && matches(row(index), row(other), input.max_delta, |_, _| false)
+    });
+    accounted
+  };
+  Some(Analysis {
+    top,
+    head: accounted(
+      &strip.head,
+      input.head,
+      assigned.iter().map(|&state| state != none).collect(),
+    ),
+    base: accounted(&strip.base, input.base, base_used),
+    segments,
+  })
+}
+
+/// Clusters of `rows`, sorted, that lie within `gap` rows of each other, as
+/// inclusive ranges.
+fn clusters(rows: &[usize], gap: usize) -> Vec<(usize, usize)> {
+  let mut clusters: Vec<(usize, usize)> = Vec::new();
+  for &row in rows {
+    match clusters.last_mut() {
+      Some((_, last)) if row - *last <= gap + 1 => *last = row,
+      _ => clusters.push((row, row)),
+    }
+  }
+  clusters
+}
+
+/// The columns `x0..=x1` of the head image, cut down the middle of each
+/// gutter between rows `first` and `last`: `STRIP_GAP` columns or more that
+/// keep one colour all the way down, as the space between two cards does.
+/// One range when there is no gutter, none when there are more than
+/// `MAX_STRIPS` columns.
+fn columns(input: &Input, x0: usize, x1: usize, first: usize, last: usize) -> Vec<(usize, usize)> {
+  let width = x1 - x0 + 1;
+  let top = input.head.row(first, x0, x1);
+  let mut uniform = vec![true; width];
+  for y in first + 1..=last {
+    let row = input.head.row(y, x0, x1);
+    let mut left = false;
+    for (x, uniform) in uniform.iter_mut().enumerate() {
+      *uniform = *uniform && within(row.get(x), top.get(x), input.max_delta);
+      left |= *uniform;
+    }
+    if !left {
+      return vec![(x0, x1)];
+    }
+  }
+  // A card's border is a line down the middle of the gutter, which moves
+  // when the cards beside it are resized: it does not split the gutter.
+  let lines: Vec<(usize, usize)> = runs(width, |x| !uniform[x])
+    .filter(|&(start, end)| start > 0 && end < width && end - start <= BORDER)
+    .collect();
+  for (start, end) in lines {
+    uniform[start..end].fill(true);
+  }
+  let cuts: Vec<usize> = runs(width, |x| uniform[x])
+    .filter(|&(start, end)| start > 0 && end < width && end - start >= STRIP_GAP)
+    .map(|(start, end)| x0 + (start + end) / 2)
+    .collect();
+  if cuts.len() >= MAX_STRIPS {
+    return Vec::new();
+  }
+  let starts = std::iter::once(x0).chain(cuts.iter().copied());
+  let ends = cuts.iter().map(|&cut| cut - 1).chain(std::iter::once(x1));
+  starts.zip(ends).collect()
+}
+
+fn analyse_strip(input: &Input, x0: usize, x1: usize, total: &mut ShiftReport) {
+  let Some(strip) = analyse(input, x0, x1, input.raw_rows) else {
+    return;
+  };
+  // Where nothing moved across the strip, nothing is looked for in its
+  // columns either.
+  if strip.segments.is_empty() {
     return;
   }
+  let pixels = |y: usize, x0: usize, x1: usize| input.mask.count_in_row(y, x0, x1);
 
-  let band = |start: usize, end: usize| Rect {
-    x: x0 as u32,
-    y: (top + start) as u32,
-    width: (x1 - x0 + 1) as u32,
-    height: (end - start) as u32,
+  // Where the strip leaves pixels of the mask unexplained, its columns may
+  // have moved apart: in a row of cards, the one that grew pushes its own
+  // content down, and the row of cards below it, but not the cards next to
+  // it. Rows that cross all the cards match nowhere, so each column is
+  // looked at on its own, around the rows left unexplained. What a column
+  // finds adds to what the strip found: both hold, pixel for pixel.
+  let unexplained: Vec<usize> = (strip.top..=strip.bottom())
+    .filter(|&y| strip.at(y) != (true, true) && pixels(y, x0, x1) > 0)
+    .collect();
+  let splits: Vec<_> = clusters(&unexplained, CLUSTER_GAP)
+    .into_iter()
+    .map(|(first, last)| (first, last, columns(input, x0, x1, first, last)))
+    .filter(|(_, _, columns)| columns.len() > 1)
+    .collect();
+  // Far enough around the rows to find where their content came from: as
+  // far as the strip saw anything move.
+  let margin = strip
+    .segments
+    .iter()
+    .map(|segment| segment.dy().unsigned_abs() as usize)
+    .max()
+    .unwrap_or(0)
+    + 2;
+
+  let mut report = ShiftReport::default();
+  let mut emit = |columns: (usize, usize),
+                  rows: (usize, usize),
+                  segments: &[ShiftSegment],
+                  found: Option<&Analysis>| {
+    report.segments.extend(
+      segments
+        .iter()
+        .filter_map(|segment| clip(segment, rows.0, rows.1)),
+    );
+    outline(
+      input,
+      columns,
+      rows,
+      |y| {
+        let (head, base) = strip.at(y);
+        let (also_head, also_base) = found.map_or((false, false), |found| found.at(y));
+        (head || also_head, base || also_base)
+      },
+      &mut report,
+    );
   };
-  let head_unmatched = |row: usize| !strip.head[row].void && assigned[row] == none;
-  let base_unmatched = |row: usize| !strip.base[row].void && !base_used[row];
+  let mut start = strip.top;
+  for (first, last, columns) in splits {
+    emit((x0, x1), (start, first), &strip.segments, None);
+    let window = (
+      first.saturating_sub(margin).max(strip.top),
+      (last + margin).min(strip.bottom()),
+    );
+    for (x0, x1) in columns {
+      if (first..=last).all(|y| pixels(y, x0, x1) == 0) {
+        continue;
+      }
+      let found = analyse(input, x0, x1, window);
+      let segments = found.as_ref().map_or(&[][..], |found| &found.segments[..]);
+      emit((x0, x1), (first, last + 1), segments, found.as_ref());
+    }
+    start = last + 1;
+  }
+  emit((x0, x1), (start, strip.bottom() + 1), &strip.segments, None);
 
+  // A strip whose moves all fall where its columns found none has nothing
+  // to say.
+  if !report.segments.is_empty() {
+    total.segments.append(&mut report.segments);
+    total.inserted.append(&mut report.inserted);
+    total.removed.append(&mut report.removed);
+    total.hidden.append(&mut report.hidden);
+    total.shifted_pixels += report.shifted_pixels;
+  }
+}
+
+/// The part of `segment` whose head rows lie in `start..end`.
+fn clip(segment: &ShiftSegment, start: usize, end: usize) -> Option<ShiftSegment> {
+  let from = (segment.head_y as usize).max(start);
+  let to = (segment.head_y as usize + segment.height as usize).min(end);
+  (from < to).then(|| ShiftSegment {
+    base_y: (from as i64 - segment.dy()) as u32,
+    head_y: from as u32,
+    height: (to - from) as u32,
+    ..*segment
+  })
+}
+
+/// Report rows `start..end` of columns `x0..=x1`: the head rows nothing
+/// accounts for as inserted, the base rows as removed, and the mask as
+/// hidden where both are.
+fn outline(
+  input: &Input,
+  (x0, x1): (usize, usize),
+  (start, end): (usize, usize),
+  accounted: impl Fn(usize) -> (bool, bool),
+  report: &mut ShiftReport,
+) {
+  let band = |from: usize, to: usize| Rect {
+    x: x0 as u32,
+    y: (start + from) as u32,
+    width: (x1 - x0 + 1) as u32,
+    height: (to - from) as u32,
+  };
+  let rows = end - start;
+  let pixels: Vec<u64> = (start..end)
+    .map(|y| input.mask.count_in_row(y, x0, x1))
+    .collect();
+  let (head, base): (Vec<bool>, Vec<bool>) = (start..end).map(accounted).unzip();
   report
     .inserted
-    .extend(runs(rows, head_unmatched).map(|(start, end)| band(start, end)));
+    .extend(runs(rows, |row| !head[row]).map(|(from, to)| band(from, to)));
   report
     .removed
-    .extend(runs(rows, base_unmatched).map(|(start, end)| band(start, end)));
-  report.shifted_pixels += (0..rows)
-    .filter(|&row| !head_unmatched(row) && !base_unmatched(row))
-    .map(|row| input.mask.count_in_row(top + row, x0, x1))
-    .sum::<u64>();
-  report.segments.extend(segments);
+    .extend(runs(rows, |row| !base[row]).map(|(from, to)| band(from, to)));
+  let hidden = |row: usize| pixels[row] == 0 || (head[row] && base[row]);
+  for (from, to) in runs(rows, hidden) {
+    // Rows without a pixel to hide need no hiding: trimmed off the ends.
+    let Some(first) = (from..to).find(|&row| pixels[row] > 0) else {
+      continue;
+    };
+    let last = (from..to)
+      .rev()
+      .find(|&row| pixels[row] > 0)
+      .expect("a row with pixels");
+    report.hidden.push(band(first, last + 1));
+    report.shifted_pixels += pixels[first..=last].iter().sum::<u64>();
+  }
 }
 
 /// Maximal runs of indices in `0..length` satisfying `predicate`, as

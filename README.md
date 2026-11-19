@@ -112,12 +112,17 @@ lights up the whole page. `result.shift` says how much of the diff is that:
 
 ```ts
 {
-  // Blocks of rows found at another height.
-  segments: [{ x: 0, width: 200, baseY: 90, headY: 120, height: 270, dy: 30 }],
+  // Blocks of rows found elsewhere: `dy` rows down, `dx` columns right.
+  segments: [
+    { x: 0, width: 200, baseY: 90, headY: 120, height: 270, dy: 30, dx: 0 },
+  ],
   // What is new, and what is gone, once movement is set aside.
   inserted: [{ x: 0, y: 90, width: 200, height: 30 }],
   removed: [],
-  // Pixels of the mask that differ only because content moved.
+  // Areas of the mask that differ only because content moved, none
+  // overlapping another: leave them out and what is left is what changed.
+  hidden: [{ x: 0, y: 120, width: 200, height: 270 }],
+  // Pixels of the mask in `hidden`.
   shiftedPixels: 20537,
 }
 ```
@@ -134,7 +139,25 @@ mask. Browsers lay content out at fractional positions and render it anew where
 it lands: a block that moves by 23.5 pixels ends up partly 23 and partly 24
 pixels down, its gradients dithered and its edges anti-aliased afresh. Exact
 matching cut such a block into dozens of pieces and lost the rows that no
-longer matched at all; it is now one block. Vertical movement only.
+longer matched at all; it is now one block.
+
+Content that slid sideways is found too: rows are hashed a second time without
+the background on either side, so a card that moved eight columns left when
+its neighbour narrowed hashes the same, and where its content starts says by
+how much. Glyphs drawn at another fraction of a column blend their edges
+differently; on edges, and only there, they are compared at the tolerant
+tier's threshold.
+
+Where rows across a strip match nowhere, its columns may have moved apart: in
+a row of cards, the one that grew pushes its own button down and the section
+below the cards, not the cards beside it. The strip is then cut down the
+gutters of the head image, the uniform columns between cards, and each column
+is looked at on its own.
+
+Background that grew or shrank is more of what is next to it: the rows a card
+gains or loses when its content moves are movement too, not a change. A new
+line of text, or a bar of another colour, differs from the rows around it and
+still shows.
 
 `cargo run --release -p iris --example shifts -- DIR` reports, for pairs of
 `NAME.base.png` and `NAME.head.png` in `DIR`, how much of each diff movement

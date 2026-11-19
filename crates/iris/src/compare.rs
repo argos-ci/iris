@@ -393,6 +393,7 @@ pub fn compare(base: &Image, head: &Image, options: &Options) -> Result<Comparis
         raw_columns: &scan.raw_columns,
         mask: &mask,
         max_delta: max_deltas[rank],
+        edge_delta: max_deltas[max_deltas.len() - 1],
         noise,
         min_rows: options.min_shift_rows as usize,
       });
