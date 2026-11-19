@@ -128,11 +128,17 @@ export interface Shift {
   inserted: Array<Rect>
   /** Rows of the base image with no counterpart in the head image. */
   removed: Array<Rect>
-  /** Pixels of the mask that differ only because content moved. */
+  /**
+   * Areas of the mask that differ only because content moved, none
+   * overlapping another: leave them out of the mask and what is left is
+   * what changed.
+   */
+  hidden: Array<Rect>
+  /** Pixels of the mask in `hidden`. */
   shiftedPixels: number
 }
 
-/** A block of rows found at another height in the head image. */
+/** A block of rows found elsewhere in the head image. */
 export interface ShiftSegment {
   x: number
   width: number
@@ -141,6 +147,11 @@ export interface ShiftSegment {
   height: number
   /** `headY - baseY`: positive when the block moved down. */
   dy: number
+  /**
+   * Columns the block moved by, positive when it moved right: in the base
+   * image it was at `x - dx`.
+   */
+  dx: number
 }
 
 /** One sensitivity level. Every tier is evaluated in the same scan. */

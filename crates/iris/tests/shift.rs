@@ -71,6 +71,7 @@ fn segment(x: u32, width: u32, base_y: u32, head_y: u32, height: u32) -> ShiftSe
     base_y,
     head_y,
     height,
+    dx: 0,
   }
 }
 
@@ -458,4 +459,152 @@ fn rows_with_nothing_to_tell_do_not_make_a_shift() {
   let result = diff(&base, &head);
   assert!(result.score > 0.0);
   assert_eq!(result.shift, None);
+}
+
+/// The pixels of the mask a viewer still sees once the shift's hidden areas
+/// are left out, as the smallest rectangle that holds them, and checks that
+/// those areas do not overlap and hold `shifted_pixels` between them.
+fn left_over(result: &Comparison) -> Option<Rect> {
+  let shift = result.shift.as_ref().expect("a shift");
+  let mask = result.mask.as_ref().expect("a mask");
+  let (width, height) = (mask.width() as usize, mask.height() as usize);
+  let mut cover = vec![0u8; width * height];
+  for rect in &shift.hidden {
+    for y in rect.y..rect.y + rect.height {
+      for x in rect.x..rect.x + rect.width {
+        cover[y as usize * width + x as usize] += 1;
+      }
+    }
+  }
+  assert!(
+    cover.iter().all(|&count| count <= 1),
+    "hidden areas overlap"
+  );
+  let mut hidden = 0;
+  let mut bounds: Option<(u32, u32, u32, u32)> = None;
+  for y in 0..height as u32 {
+    for x in 0..width as u32 {
+      if !mask.is_set(x, y) {
+        continue;
+      }
+      if cover[y as usize * width + x as usize] == 1 {
+        hidden += 1;
+        continue;
+      }
+      bounds = Some(match bounds {
+        None => (x, y, x, y),
+        Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+      });
+    }
+  }
+  assert_eq!(hidden, shift.shifted_pixels);
+  bounds.map(|(x0, y0, x1, y1)| band(x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+}
+
+/// Whether `inner` lies inside `outer`.
+fn inside(inner: Rect, outer: Rect) -> bool {
+  inner.x >= outer.x
+    && inner.y >= outer.y
+    && inner.x + inner.width <= outer.x + outer.width
+    && inner.y + inner.height <= outer.y + outer.height
+}
+
+#[test]
+fn cards_that_move_apart_are_each_explained() {
+  // Three cards side by side over a section of text. The first card gains a
+  // line in its middle, which pushes the rest of it down, and the section
+  // below with it; the other two stay where they were, over more blank
+  // space. No row across the three cards matches anywhere: each card is
+  // looked at on its own.
+  let card = 120;
+  let cards = |first: Vec<Row>, second: Vec<Row>, third: Vec<Row>| {
+    beside(&beside(&first, 40, &second), 40, &third)
+  };
+  let width = 3 * card + 2 * 40;
+  let footer = text(width, 60..66);
+  let base = [
+    cards(text(card, 0..10), text(card, 20..30), text(card, 40..50)),
+    footer.clone(),
+  ]
+  .concat();
+  let grown = [text(card, 0..5), text_line(card, 900), text(card, 5..10)].concat();
+  let padded = |lines| [text(card, lines), block(card, 18, WHITE)].concat();
+  let head = [cards(grown, padded(20..30), padded(40..50)), footer].concat();
+
+  let result = diff(&base, &head);
+  let shift = result.shift.as_ref().expect("a shift");
+  // The first card's last five lines moved down with the section below.
+  assert!(
+    shift
+      .segments
+      .iter()
+      .any(|segment| segment.x < card as u32 && segment.dy() == 18),
+    "{:?}",
+    shift.segments
+  );
+  // All that is left to see is the new line, in the first card.
+  let left = left_over(&result).expect("a change");
+  assert!(inside(left, band(0, 90, card as u32, 12)), "{left:?}");
+}
+
+#[test]
+fn content_that_slid_sideways_is_a_shift() {
+  // Two cards side by side; the second slides six columns right, as when
+  // the first one widens. Its rows are found again, six columns along.
+  let card = 120;
+  let base = beside(&text(card, 0..8), 40, &text(card, 20..28));
+  let base: Vec<Row> = base
+    .into_iter()
+    .map(|mut row| {
+      row.extend([WHITE; 20]);
+      row
+    })
+    .collect();
+  let head: Vec<Row> = beside(&text(card, 0..8), 46, &text(card, 20..28))
+    .into_iter()
+    .map(|mut row| {
+      row.extend([WHITE; 14]);
+      row
+    })
+    .collect();
+
+  let result = diff(&base, &head);
+  let shift = result.shift.as_ref().expect("a shift");
+  assert!(!shift.segments.is_empty());
+  assert!(
+    shift
+      .segments
+      .iter()
+      .all(|segment| segment.dx == 6 && segment.dy() == 0),
+    "{:?}",
+    shift.segments
+  );
+  // It moved, and nothing else happened.
+  assert_eq!(left_over(&result), None);
+}
+
+#[test]
+fn padding_that_shrinks_is_movement() {
+  // A card's text gains a line, which pushes its button down into the blank
+  // space below: the card keeps its height, its padding shrinks. Neither the
+  // button nor the padding changed; the new line did.
+  let width = 160;
+  let button = text_line(width, 50);
+  let base = framed(&[text(width, 0..3), button.clone(), block(width, 40, WHITE)].concat());
+  let head = framed(
+    &[
+      text(width, 0..3),
+      text_line(width, 900),
+      button,
+      block(width, 22, WHITE),
+    ]
+    .concat(),
+  );
+
+  let result = diff(&base, &head);
+  let shift = result.shift.as_ref().expect("a shift");
+  assert_eq!(shift.segments.len(), 1, "{:?}", shift.segments);
+  assert_eq!(shift.segments[0].dy(), 18);
+  let left = left_over(&result).expect("a change");
+  assert!(inside(left, band(0, 54, width as u32, 12)), "{left:?}");
 }

@@ -63,13 +63,14 @@ fn main() {
       if let Some(shift) = &result.shift {
         for segment in &shift.segments {
           println!(
-            "    x {:>4}+{:<4} base {:>5} head {:>5} height {:>5} dy {:>+6}",
+            "    x {:>4}+{:<4} base {:>5} head {:>5} height {:>5} dy {:>+6} dx {:>+5}",
             segment.x,
             segment.width,
             segment.base_y,
             segment.head_y,
             segment.height,
-            segment.dy()
+            segment.dy(),
+            segment.dx
           );
         }
         for rect in &shift.inserted {
